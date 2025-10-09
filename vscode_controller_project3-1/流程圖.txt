@@ -1,615 +1,482 @@
-# AI 自動化開發控制器 - 詳細內部流程圖
+# AI自動化開發控制器 Pro v5.5 - 系統架構與流程圖
 
-## 1. 系統架構總覽
+## 📐 一、系統總體架構
 
 ```mermaid
 graph TB
     subgraph "前端層 (HTML/JavaScript)"
-        UI[用戶介面]
-        FileUpload[檔案上傳模組]
-        ConfigUI[配置介面]
-        MonitorUI[監控介面]
+        UI[用戶界面]
+        FileUpload[文件上傳<br/>拖放/選擇]
+        ProjectPanel[項目面板<br/>文件結構]
+        Monitor[監控界面<br/>程式狀態]
     end
     
-    subgraph "Flask 路由層"
-        Route1["/run-process"]
-        Route2["/capture-screenshots"]
-        Route3["/api/config"]
-        Route4["/select-folder"]
-        Route5["/running-programs"]
-        Route6["/terminate-program"]
+    subgraph "Flask路由層 (Python)"
+        R1[/run-process<br/>主執行流程]
+        R2[/capture-screenshots<br/>螢幕擷取]
+        R3[/api/config<br/>配置管理]
+        R4[/load-project<br/>項目載入]
+        R5[/running-programs<br/>程式監控]
     end
     
-    subgraph "核心處理層"
-        PM[ProcessManager]
-        CM[ConfigManager]
-        GA[GeminiAI]
-        VSC[VSCodeController]
-        SC[ScreenCapture]
-        CP[CodeProcessor]
-        PGM[ProgramManager]
+    subgraph "核心引擎層"
+        PM[ProcessManager<br/>流程編排器]
+        GA[GeminiAI<br/>API管理器]
+        CM[ConversationManager<br/>對話歷史v5.5]
+        VSC[VSCodeController<br/>編輯器控制]
+        SC[ScreenCapture<br/>智能截圖]
+        PGM[ProgramManager<br/>程式執行管理]
     end
     
-    subgraph "數據模型層"
-        AIConfig[AIConfig Dataclass]
-        FileOutput[FileOutput Dataclass]
-        ProjectOutput[ProjectOutput Dataclass]
-        ProcessResult[ProcessResult Dataclass]
+    subgraph "數據持久層"
+        Conv[conversations/<br/>對話歷史JSON]
+        Proj[projects/<br/>專案元數據]
+        Screen[screenshots/<br/>截圖PNG]
+        Config[config.json<br/>用戶配置]
     end
     
     subgraph "外部服務"
-        GeminiAPI[Gemini API]
-        VSCode[VS Code]
-        Browser[瀏覽器]
-        FileSystem[檔案系統]
+        Gemini[Google Gemini API<br/>2.5 Pro/Flash]
+        VSCode[Visual Studio Code<br/>code CLI]
+        Browser[瀏覽器<br/>獨立APP模式]
     end
     
-    UI --> Route1
-    FileUpload --> Route1
-    ConfigUI --> Route3
-    MonitorUI --> Route2
+    UI --> R1
+    FileUpload --> R1
+    Monitor --> R5
     
-    Route1 --> PM
-    Route2 --> SC
-    Route3 --> CM
-    Route4 --> FileSystem
-    Route5 --> PGM
-    Route6 --> PGM
+    R1 --> PM
+    R2 --> SC
+    R3 --> Config
+    R4 --> CM
+    R5 --> PGM
     
     PM --> GA
-    PM --> CP
+    PM --> CM
     PM --> VSC
     PM --> PGM
     
-    GA --> GeminiAPI
+    GA --> Gemini
     VSC --> VSCode
     PGM --> Browser
-    CP --> FileSystem
+    
+    CM --> Conv
+    SC --> Screen
 ```
 
-## 2. 主要執行流程（/run-process）
+## 🔄 二、主要執行流程 (/run-process)
 
 ```mermaid
 flowchart TD
-    Start[開始: 用戶點擊執行]
+    Start([用戶輸入需求])
     
-    subgraph "前端處理"
-        CollectData[收集數據]
-        CollectData --> |folder_path| FolderPath[資料夾路徑: string]
-        CollectData --> |prompt| Prompt[AI 指令: string]
-        CollectData --> |config| ConfigData[配置: object]
-        CollectData --> |files| FileList[檔案列表: array]
-        
-        FileList --> |每個檔案| FileProcess[處理檔案]
-        FileProcess --> |name| FileName[檔案名: string]
-        FileProcess --> |type| FileType[MIME類型: string]
-        FileProcess --> |content| FileContent[Base64內容: string]
+    subgraph "第1階段：數據收集"
+        A1[收集輸入參數]
+        A2{是否迭代模式?}
+        A3[載入現有項目文件]
+        A4{附加截圖?}
+        A5[啟動主程式並等待]
+        A6[擷取視窗畫面]
+        A7{附加Terminal?}
+        A8[收集所有程式輸出]
     end
     
-    subgraph "Flask 路由處理"
-        RouteHandler["/run-process 路由]
-        RouteHandler --> ValidateInput{輸入驗證}
-        ValidateInput --> |無效| ReturnError1[返回錯誤 400]
-        ValidateInput --> |有效| CreateConfig[創建 AIConfig 實例]
-        
-        CreateConfig --> |config_data| ConfigInstance[
-            AIConfig:
-            - connection_method
-            - gemini_api_key
-            - model_name
-            - generation_params
-            - safety_settings
-        ]
+    subgraph "第2階段：AI處理"
+        B1[構建Gemini請求]
+        B2[處理上傳文件]
+        B3[Base64編碼圖片/PDF]
+        B4[添加Terminal輸出]
+        B5[呼叫Gemini API]
+        B6[解析JSON回應]
+        B7[提取usage_metadata]
     end
     
-    subgraph "ProcessManager.run_automation_process"
-        PMStart[ProcessManager 開始]
-        PMStart --> |folder_path, prompt, config, files| Step1[Step 1: 呼叫 AI]
-        
-        Step1 --> |prompt, config, files| GeminiGenerate[
-            GeminiAI.generate_content:
-            處理上傳檔案
-        ]
-        
-        GeminiGenerate --> ProcessFiles{有檔案?}
-        ProcessFiles --> |是| HandleFiles[處理每個檔案]
-        ProcessFiles --> |否| DirectPrompt[直接使用 prompt]
-        
-        HandleFiles --> |image/*| ProcessImage[
-            處理圖片:
-            - 解碼 Base64
-            - 轉換格式
-        ]
-        HandleFiles --> |application/pdf| ProcessPDF[
-            處理 PDF:
-            - 解碼 Base64
-            - 提取內容
-        ]
-        HandleFiles --> |text/*| ProcessText[
-            處理文本:
-            - 解碼內容
-            - 添加標記
-        ]
-        
-        ProcessImage --> ContentParts[content_parts 陣列]
-        ProcessPDF --> ContentParts
-        ProcessText --> ContentParts
-        DirectPrompt --> ContentParts
-        
-        ContentParts --> CallGemini[呼叫 Gemini API]
-        CallGemini --> |response_text| AIResponse[AI 回應文本]
-        CallGemini --> |json_data| JSONData[解析的 JSON]
+    subgraph "第3階段：代碼生成"
+        C1[解析ProjectOutput]
+        C2[提取多個FileOutput]
+        C3{是迭代?}
+        C4[終止舊程式]
+        C5[安裝依賴套件]
+        C6[創建/更新文件]
     end
     
-    subgraph "Step 2: 解析回應"
-        ParseStart[開始解析]
-        ParseStart --> CheckJSON{有 JSON?}
-        CheckJSON --> |是| ParseJSON[
-            CodeProcessor.parse_json_response:
-            - project_name
-            - description
-            - files[]
-            - main_file
-            - setup_instructions
-            - run_instructions
-        ]
-        CheckJSON --> |否| ExtractJSON[嘗試提取 JSON]
-        ExtractJSON --> |成功| ParseJSON
-        ExtractJSON --> |失敗| ReturnError2[返回解析錯誤]
-        
-        ParseJSON --> CreateProject[
-            創建 ProjectOutput:
-            - 多個 FileOutput 實例
-        ]
-        
-        CreateProject --> FileOutputData[
-            每個 FileOutput:
-            - filename: string
-            - filetype: string
-            - code: string
-            - opens_window: bool
-            - window_title: string?
-            - install_requirements: array?
-            - dependencies: array?
-            - is_web_app: bool
-            - can_open_standalone: bool
-            - server_address: string?
-            - web_title: string?
-        ]
+    subgraph "第4階段：執行與控制"
+        D1[啟動VS Code]
+        D2[自動打開文件]
+        D3{有主文件?}
+        D4{是Web應用?}
+        D5[啟動伺服器]
+        D6[開啟獨立瀏覽器]
+        D7[執行一般程式]
     end
     
-    subgraph "Step 3: 安裝套件"
-        CheckRequirements{有安裝需求?}
-        CheckRequirements --> |是| InstallPackages[
-            CodeProcessor.install_packages:
-            執行 pip/npm 命令
-        ]
-        CheckRequirements --> |否| SkipInstall[跳過安裝]
-        
-        InstallPackages --> InstallLogs[安裝日誌: array]
+    subgraph "第5階段：監控與反饋"
+        E1[捕獲Terminal輸出]
+        E2[自動擷取視窗]
+        E3[保存對話歷史]
+        E4[更新項目列表]
+        E5[返回結果給前端]
     end
     
-    subgraph "Step 4: 儲存檔案"
-        SaveFiles[
-            CodeProcessor.save_project_files:
-            - 創建專案目錄
-            - 寫入每個檔案
-            - 儲存 PROJECT_INFO.json
-        ]
-        SaveFiles --> |saved_files| FilesList[已儲存檔案列表]
-    end
+    Start --> A1
+    A1 --> A2
+    A2 -->|是| A3
+    A2 -->|否| A7
+    A3 --> A4
+    A4 -->|是| A5
+    A4 -->|否| A7
+    A5 --> A6
+    A6 --> A7
+    A7 -->|是| A8
+    A7 -->|否| B1
+    A8 --> B1
     
-    subgraph "Step 5: 開啟 VS Code"
-        OpenVSCode[
-            VSCodeController.launch_and_open:
-            - folder_path: project_dir
-            - filenames: files[:3]
-        ]
-        OpenVSCode --> FindWindow[尋找 VS Code 視窗]
-        FindWindow --> ActivateWindow[啟用視窗]
-        ActivateWindow --> OpenFiles[
-            開啟檔案:
-            使用 pyperclip + pyautogui
-        ]
-        OpenFiles --> VSCodeResult[
-            結果:
-            - success: bool
-            - window_found: bool
-            - files_opened: array
-        ]
-    end
+    B1 --> B2
+    B2 --> B3
+    B3 --> B4
+    B4 --> B5
+    B5 --> B6
+    B6 --> B7
+    B7 --> C1
     
-    subgraph "Step 6: 執行程式"
-        CheckMainFile{有主檔案?}
-        CheckMainFile --> |是| RunFile[
-            ProgramManager.run_file:
-            - filepath: main_file_path
-            - folder_path: project_dir
-            - file_info: FileOutput
-        ]
-        CheckMainFile --> |否| SkipRun[跳過執行]
-        
-        RunFile --> CheckWebApp{是網頁應用?}
-        CheckWebApp --> |是 & HTML| OpenBrowser1[直接開啟瀏覽器]
-        CheckWebApp --> |是 & Server| StartServer[
-            啟動伺服器:
-            - Python: subprocess.Popen
-            - Node.js: subprocess.Popen
-        ]
-        CheckWebApp --> |否| RunNormal[一般執行]
-        
-        StartServer --> CheckStandalone{can_open_standalone?}
-        CheckStandalone --> |否| OpenBrowser2[
-            控制器開啟瀏覽器:
-            ProgramManager.open_standalone_browser
-        ]
-        CheckStandalone --> |是| WaitForApp[等待應用自行開啟]
-        
-        OpenBrowser2 --> BrowserWindow[
-            獨立瀏覽器視窗:
-            - Chrome --app 模式
-            - Edge --app 模式
-        ]
-    end
+    C1 --> C2
+    C2 --> C3
+    C3 -->|是| C4
+    C3 -->|否| C5
+    C4 --> C5
+    C5 --> C6
+    C6 --> D1
     
-    subgraph "結果整合"
-        BuildResult[
-            構建 ProcessResult:
-            - success: bool
-            - output: string
-            - files_created: array
-            - project_data: ProjectOutput
-            - ai_response: string
-            - ai_response_json: object
-            - installation_logs: array
-            - screenshots: array
-        ]
-        
-        BuildResult --> ReturnResponse[
-            返回 JSON 回應:
-            - success
-            - output
-            - files_created
-            - ai_response
-            - ai_response_json
-            - project
-            - installation_logs
-        ]
-    end
+    D1 --> D2
+    D2 --> D3
+    D3 -->|是| D4
+    D3 -->|否| E1
+    D4 -->|是| D5
+    D4 -->|否| D7
+    D5 --> D6
+    D6 --> E1
+    D7 --> E1
     
-    Start --> CollectData
-    FolderPath --> RouteHandler
-    Prompt --> RouteHandler
-    ConfigData --> RouteHandler
-    FileList --> RouteHandler
-    
-    ConfigInstance --> PMStart
-    JSONData --> ParseStart
-    FileOutputData --> CheckRequirements
-    InstallLogs --> SaveFiles
-    FilesList --> OpenVSCode
-    VSCodeResult --> CheckMainFile
-    
-    OpenBrowser1 --> BuildResult
-    BrowserWindow --> BuildResult
-    WaitForApp --> BuildResult
-    RunNormal --> BuildResult
-    SkipRun --> BuildResult
-    
-    ReturnResponse --> End[結束]
+    E1 --> E2
+    E2 --> E3
+    E3 --> E4
+    E4 --> E5
+    E5 --> End([完成])
 ```
 
-## 3. 螢幕擷取流程（/capture-screenshots）
-
-```mermaid
-flowchart TD
-    CaptureStart[開始: 擷取請求]
-    
-    subgraph "輸入參數"
-        InputData[
-            輸入數據:
-            - mode: 'programs'/'monitors'/'all'
-            - window_titles: array
-            - project_name: string
-            - project_json: object
-        ]
-    end
-    
-    subgraph "ScreenCapture.capture_running_programs"
-        GetWindows[pygetwindow.getAllWindows()]
-        GetWindows --> WindowList[所有視窗列表]
-        
-        WindowList --> ProcessWindow[處理每個視窗]
-        ProcessWindow --> CheckTitle{檢查標題}
-        
-        CheckTitle --> |匹配| MatchLogic[
-            匹配邏輯:
-            1. VS Code + project_name
-            2. 瀏覽器 + web_title
-            3. 指定的 window_titles
-            4. 關鍵字匹配
-        ]
-        
-        MatchLogic --> ActivateWin[
-            啟用視窗:
-            - window.restore()
-            - window.activate()
-        ]
-        
-        ActivateWin --> CaptureWin[
-            使用 mss 擷取:
-            - 獲取視窗座標
-            - 擷取畫面
-            - 儲存 PNG
-        ]
-        
-        CaptureWin --> AddToList[
-            添加到結果:
-            - filename
-            - path
-            - width/height
-            - timestamp
-        ]
-    end
-    
-    subgraph "智能視窗偵測"
-        CollectKeywords[
-            收集關鍵字:
-            - 從 project_json 提取 web_title
-            - 從 HTML 提取 title 標籤
-            - server_address 端口號
-            - 常見關鍵字
-        ]
-        
-        CollectKeywords --> ScoreWindows[
-            計算匹配分數:
-            每個關鍵字 +1 分
-        ]
-        
-        ScoreWindows --> SortWindows[按分數排序]
-        SortWindows --> SelectBest[選擇前3個最佳匹配]
-    end
-    
-    CaptureStart --> InputData
-    InputData --> GetWindows
-    AddToList --> ReturnScreenshots[
-        返回結果:
-        - success: true
-        - screenshots: array
-        - count: number
-    ]
-```
-
-## 4. 配置管理流程
+## 🗂️ 三、對話歷史管理 (v5.5核心改進)
 
 ```mermaid
 flowchart LR
-    subgraph "ConfigManager"
-        Load[load()] --> CheckFile{檔案存在?}
-        CheckFile --> |是| ReadFile[讀取 config.json]
-        CheckFile --> |否| DefaultConfig[使用預設配置]
-        
-        ReadFile --> ParseConfig[解析 JSON]
-        ParseConfig --> CreateAIConfig[
-            創建 AIConfig:
-            - connection_method
-            - gemini_api_key
-            - model_name
-            - generation_params
-            - safety_settings
-            - automation_settings
-        ]
-        
-        Save[save(config)] --> WriteFile[寫入 config.json]
-        WriteFile --> Success[返回成功/失敗]
+    subgraph "ConversationManager v5.5"
+        A[load_conversation]
+        B[save_conversation]
+        C[add_message]
     end
     
-    subgraph "配置數據流"
-        Frontend[前端表單] --> |POST /api/config| SaveEndpoint
-        SaveEndpoint --> Save
-        
-        LoadEndpoint[GET /api/config] --> Load
-        CreateAIConfig --> ReturnConfig[返回配置數據]
-        ReturnConfig --> Frontend
+    subgraph "ConversationMessage結構"
+        M1[role: user/assistant]
+        M2[content: 文本內容]
+        M3[timestamp: ISO時間]
+        M4[files: 文件元數據]
+        M5[metadata: 額外信息]
+        M6[terminal_output: 終端輸出]
+        M7[usage_metadata: Token統計★]
     end
+    
+    subgraph "存儲結構"
+        F1[conversations/conv_hash.json]
+        F2[project_dir的MD5作為文件名]
+        F3[包含完整對話陣列]
+        F4[每條消息都有usage_metadata]
+    end
+    
+    A --> M1
+    C --> M7
+    B --> F1
+    F1 --> F3
+    F3 --> F4
+    
+    style M7 fill:#90EE90
+    style F4 fill:#90EE90
 ```
 
-## 5. 程式執行管理
+## 🖼️ 四、智能截圖系統
 
 ```mermaid
 flowchart TD
-    subgraph "ProgramManager 類別"
-        RunningPrograms[
-            running_programs: dict
-            {pid: info}
-        ]
-        
-        AddProgram[
-            add_program(process, filename, folder_path, window_title):
-            添加到管理列表
-        ]
-        
-        CheckPrograms[
-            check_programs():
-            檢查所有程式狀態
-        ] --> PollProcess[process.poll()]
-        
-        PollProcess --> |None| StillRunning[仍在運行]
-        PollProcess --> |exit_code| Terminated[已結束]
-        
-        TerminateProgram[
-            terminate_program(pid):
-            終止指定程式
-        ] --> |terminate()| WaitTerminate[等待終止]
-        WaitTerminate --> |未終止| Kill[強制 kill()]
-        
-        RunFile[
-            run_file(filepath, folder_path, file_info):
-            執行檔案
-        ] --> CheckType{檔案類型}
-        
-        CheckType --> |.py| RunPython[_run_python()]
-        CheckType --> |.js| RunNode[_run_node()]
-        CheckType --> |.html| OpenHTML[開啟瀏覽器]
-        
-        RunPython --> CreateProcess[
-            subprocess.Popen:
-            - 隱藏控制台
-            - 捕獲輸出
-        ]
-        
-        OpenStandalone[
-            open_standalone_browser(url, title):
-            開啟獨立瀏覽器
-        ] --> DetectOS{作業系統}
-        
-        DetectOS --> |Windows| ChromeApp[Chrome --app 模式]
-        DetectOS --> |macOS| ChromeMac[Chrome app 模式]
-        DetectOS --> |Linux| ChromeLinux[尋找可用瀏覽器]
-    end
+    Start[觸發截圖請求]
+    
+    A1[獲取project_json]
+    A2[提取所有window_titles]
+    A3[提取所有web_titles]
+    A4[生成項目名稱變體]
+    
+    B1[枚舉所有視窗]
+    B2{匹配邏輯}
+    
+    C1[VS Code + 項目名]
+    C2[瀏覽器 + web_title]
+    C3[直接標題匹配]
+    C4[項目名稱變體匹配]
+    
+    D1[激活視窗]
+    D2[使用mss擷取]
+    D3[保存PNG文件]
+    D4[添加到結果列表]
+    
+    End[返回截圖列表]
+    
+    Start --> A1
+    A1 --> A2
+    A2 --> A3
+    A3 --> A4
+    A4 --> B1
+    B1 --> B2
+    
+    B2 --> C1
+    B2 --> C2
+    B2 --> C3
+    B2 --> C4
+    
+    C1 --> D1
+    C2 --> D1
+    C3 --> D1
+    C4 --> D1
+    
+    D1 --> D2
+    D2 --> D3
+    D3 --> D4
+    D4 --> End
 ```
 
-## 6. 數據流總覽
+## ⚙️ 五、VS Code自動控制流程
 
 ```mermaid
-graph TD
-    subgraph "用戶輸入"
-        UserInput[
-            用戶輸入:
-            1. 專案路徑
-            2. AI 指令
-            3. 上傳檔案
-            4. 配置參數
-        ]
+sequenceDiagram
+    participant PM as ProcessManager
+    participant VSC as VSCodeController
+    participant OS as 作業系統
+    participant VSCode as VS Code實例
+    participant PyAuto as PyAutoGUI
+    
+    PM->>VSC: launch_and_open(folder, files)
+    VSC->>OS: subprocess.Popen(['code', folder, file1])
+    OS->>VSCode: 啟動VS Code
+    
+    loop 15秒超時檢測
+        VSC->>OS: pywinctl.getAllWindows()
+        OS-->>VSC: 視窗列表
+        VSC->>VSC: 搜尋匹配的VS Code視窗
     end
     
-    subgraph "數據轉換層"
-        Transform1[前端 JavaScript 對象]
-        Transform2[JSON 序列化]
-        Transform3[Flask request.get_json()]
-        Transform4[Python 字典]
-        Transform5[Dataclass 實例化]
+    VSC->>VSCode: window.activate()
+    VSCode-->>VSC: 視窗已激活
+    
+    loop 打開額外文件
+        VSC->>PyAuto: hotkey('ctrl', 'p')
+        PyAuto->>VSCode: 觸發快捷鍵
+        VSC->>PyAuto: pyperclip.copy(filename)
+        VSC->>PyAuto: hotkey('ctrl', 'v')
+        VSC->>PyAuto: press('enter')
+        PyAuto->>VSCode: 文件已開啟
     end
     
-    subgraph "處理層"
-        Process1[AI 生成]
-        Process2[JSON 解析]
-        Process3[檔案生成]
-        Process4[程式執行]
-    end
-    
-    subgraph "輸出層"
-        Output1[專案檔案]
-        Output2[VS Code 視窗]
-        Output3[瀏覽器視窗]
-        Output4[螢幕截圖]
-        Output5[JSON 回應]
-    end
-    
-    UserInput --> Transform1
-    Transform1 --> Transform2
-    Transform2 --> |HTTP POST| Transform3
-    Transform3 --> Transform4
-    Transform4 --> Transform5
-    
-    Transform5 --> Process1
-    Process1 --> Process2
-    Process2 --> Process3
-    Process3 --> Process4
-    
-    Process4 --> Output1
-    Process4 --> Output2
-    Process4 --> Output3
-    Process4 --> Output4
-    
-    Output1 --> Output5
-    Output2 --> Output5
-    Output3 --> Output5
-    Output4 --> Output5
-    
-    Output5 --> |HTTP Response| UserInterface[用戶介面更新]
+    VSC-->>PM: 返回成功結果
 ```
 
-## 7. 錯誤處理流程
+## 🚀 六、程式執行管理
 
 ```mermaid
-flowchart TD
-    subgraph "錯誤捕獲層級"
-        Level1[Flask 路由 try-catch]
-        Level2[ProcessManager try-catch]
-        Level3[各模組內部 try-catch]
-    end
+stateDiagram-v2
+    [*] --> 待執行
     
-    subgraph "錯誤類型"
-        E1[輸入驗證錯誤]
-        E2[API 連接錯誤]
-        E3[JSON 解析錯誤]
-        E4[檔案系統錯誤]
-        E5[程式執行錯誤]
-        E6[視窗控制錯誤]
-    end
+    待執行 --> 檢查類型: run_file()
     
-    subgraph "錯誤處理"
-        LogError[記錄到 logger]
-        CreateErrorResponse[
-            創建錯誤回應:
-            - success: false
-            - error: 錯誤訊息
-            - ai_response: 原始回應
-        ]
-        ShowNotification[前端顯示通知]
-        Cleanup[清理資源]
-    end
+    檢查類型 --> Python程式: .py
+    檢查類型 --> Node程式: .js
+    檢查類型 --> HTML文件: .html
+    檢查類型 --> Web應用: is_web_app
     
-    E1 --> |400| CreateErrorResponse
-    E2 --> |500| CreateErrorResponse
-    E3 --> |解析失敗| CreateErrorResponse
-    E4 --> |IOError| CreateErrorResponse
-    E5 --> |CalledProcessError| CreateErrorResponse
-    E6 --> |WindowNotFound| CreateErrorResponse
+    Python程式 --> 創建進程: subprocess.Popen
+    Node程式 --> 創建進程
     
-    CreateErrorResponse --> LogError
-    CreateErrorResponse --> ShowNotification
-    CreateErrorResponse --> Cleanup
+    創建進程 --> 捕獲輸出: stdout pipe
+    捕獲輸出 --> 輸出隊列: queue.Queue
+    輸出隊列 --> 背景執行: 運行中
+    
+    Web應用 --> 啟動伺服器: 後端server
+    啟動伺服器 --> 開啟瀏覽器: 獨立視窗
+    開啟瀏覽器 --> 背景執行
+    
+    HTML文件 --> 直接瀏覽器: webbrowser.open
+    直接瀏覽器 --> [*]
+    
+    背景執行 --> 監控狀態: check_programs()
+    監控狀態 --> 背景執行: poll() == None
+    監控狀態 --> 已結束: poll() != None
+    
+    已結束 --> [*]
 ```
 
-## 8. 關鍵變數傳遞路徑
-
-| 變數名稱 | 起始點 | 傳遞路徑 | 最終用途 |
-|---------|--------|----------|----------|
-| `folder_path` | 前端輸入 | → Flask → ProcessManager → CodeProcessor | 儲存專案檔案 |
-| `prompt` | 前端輸入 | → Flask → ProcessManager → GeminiAI | AI 生成提示 |
-| `files` | 檔案上傳 | → Flask → ProcessManager → GeminiAI | 檔案分析 |
-| `config` | 前端設定 | → Flask → AIConfig → GeminiAI | API 配置 |
-| `json_data` | Gemini 回應 | → CodeProcessor → ProjectOutput | 專案結構 |
-| `project_dir` | CodeProcessor | → VSCodeController → ProgramManager | 執行路徑 |
-| `window_titles` | ProjectOutput | → ScreenCapture | 視窗偵測 |
-| `process` | subprocess | → ProgramManager.running_programs | 程式管理 |
-| `screenshots` | ScreenCapture | → Flask Response | 前端顯示 |
-| `result` | ProcessResult | → Flask Response | 最終回應 |
-
-## 9. 非同步處理點
+## 📊 七、數據流向圖
 
 ```mermaid
 graph LR
-    subgraph "同步處理"
-        S1[Flask 路由處理]
-        S2[檔案讀寫]
-        S3[配置管理]
+    subgraph "輸入數據"
+        I1[用戶指令]
+        I2[上傳文件]
+        I3[項目路徑]
+        I4[配置參數]
     end
     
-    subgraph "非同步處理"
-        A1[subprocess.Popen - 程式執行]
-        A2[threading - Flask 伺服器]
-        A3[setTimeout - 前端定時器]
-        A4[setInterval - 程式狀態檢查]
+    subgraph "處理層"
+        P1[文件編碼]
+        P2[prompt構建]
+        P3[API調用]
+        P4[JSON解析]
     end
     
-    subgraph "等待點"
-        W1[time.sleep - VS Code 啟動]
-        W2[time.sleep - 瀏覽器載入]
-        W3[poll() - 程式狀態檢查]
+    subgraph "輸出數據"
+        O1[項目文件]
+        O2[對話記錄]
+        O3[截圖文件]
+        O4[Token統計]
+        O5[Terminal輸出]
     end
+    
+    I1 --> P2
+    I2 --> P1
+    I3 --> P2
+    I4 --> P3
+    
+    P1 --> P2
+    P2 --> P3
+    P3 --> P4
+    
+    P4 --> O1
+    P4 --> O2
+    P3 --> O4
+    O1 --> O5
+    
+    O2 -.保存.-> DB[(conversations/)]
+    O1 -.保存.-> FS[(projects/)]
+    O3 -.保存.-> IMG[(screenshots/)]
 ```
 
-這個流程圖展示了整個系統的詳細運作流程，包括所有主要的變數傳遞、函數調用和數據轉換過程。
+## 🔐 八、關鍵變量傳遞路徑
+
+| 變量 | 起點 | 傳遞路徑 | 終點 |
+|------|------|----------|------|
+| `folder_path` | 前端選擇 | Flask → ProcessManager → CodeProcessor | 文件系統 |
+| `prompt` | 用戶輸入 | Flask → ProcessManager → GeminiAI | API請求 |
+| `files[]` | 文件上傳 | Base64編碼 → GeminiAI | multimodal輸入 |
+| `usage_metadata` | Gemini響應 | response.usage_metadata → ConversationMessage | 對話歷史 |
+| `terminal_output` | subprocess.stdout | queue → ProgramManager → ConversationMessage | 前端顯示 |
+| `is_iteration` | 前端狀態 | Flask → ProcessManager | 決定執行模式 |
+| `project_dir` | 路徑計算 | 新建/迭代分支 | 最終項目位置 |
+
+## 🛠️ 九、關鍵技術實現
+
+### 9.1 文件處理管道
+
+```mermaid
+flowchart LR
+    A[文件上傳] --> B{文件類型}
+    B -->|圖片| C[Base64編碼]
+    B -->|PDF| D[Base64編碼]
+    B -->|文本| E[UTF-8讀取]
+    
+    C --> F[image/png<br/>MIME type]
+    D --> G[application/pdf<br/>MIME type]
+    E --> H[text/plain<br/>MIME type]
+    
+    F --> I[Gemini vision處理]
+    G --> J[Gemini PDF處理]
+    H --> K[Gemini text處理]
+    
+    I --> L[統一API調用]
+    J --> L
+    K --> L
+```
+
+### 9.2 Token統計機制 (v5.5核心)
+
+```python
+# 從Gemini響應提取
+if hasattr(response, 'usage_metadata'):
+    um = response.usage_metadata
+    usage_metadata = {
+        'prompt_token_count': um.prompt_token_count,
+        'candidates_token_count': um.candidates_token_count,
+        'thoughts_token_count': um.thoughts_token_count,
+        'total_token_count': um.total_token_count
+    }
+
+# 獨立保存到ConversationMessage
+ConversationManager.add_message(
+    project_dir,
+    'assistant',
+    content,
+    usage_metadata=usage_metadata  # ★ 獨立字段
+)
+```
+
+### 9.3 項目目錄管理邏輯
+
+```python
+# v5.5修復：確保路徑一致性
+if is_iteration:
+    final_project_dir = folder_path  # 迭代：使用現有路徑
+else:
+    final_project_dir = folder_path / project_name  # 新建：創建子目錄
+    
+    # 遷移對話記錄到新目錄
+    temp_conversation = ConversationManager.load_conversation(folder_path)
+    temp_conversation.project_dir = final_project_dir
+    ConversationManager.save_conversation(temp_conversation)
+    
+    # 清理臨時文件
+    temp_conv_file.unlink()
+```
+
+## ⚡ 十、性能優化要點
+
+1. **異步輸出捕獲**：使用threading + queue避免阻塞
+2. **智能視窗匹配**：多層匹配邏輯減少誤判
+3. **Base64流式處理**：避免大文件內存溢出
+4. **對話歷史壓縮**：只保留最近50行terminal輸出
+5. **瀏覽器進程追蹤**：獨立管理避免殘留進程
+
+## 🔄 十一、錯誤恢復機制
+
+```mermaid
+flowchart TD
+    A[執行失敗] --> B{錯誤類型}
+    
+    B -->|API錯誤| C[記錄原始響應]
+    B -->|JSON解析失敗| D[嘗試從Markdown提取]
+    B -->|文件操作失敗| E[檢查權限並重試]
+    B -->|程式崩潰| F[捕獲退出碼]
+    
+    C --> G[保存到對話歷史]
+    D --> G
+    E --> G
+    F --> G
+    
+    G --> H[前端顯示詳細錯誤]
+    H --> I[提供解決建議]
+```
+
+---
+
+## 📝 總結
+
+v5.5版本的核心改進：
+1. ✅ **修復Token統計消失**：usage_metadata作為獨立字段持久化
+2. ✅ **修復路徑不一致**：明確區分新建/迭代模式的目錄處理
+3. ✅ **清理臨時文件**：避免對話記錄污染
+4. ✅ **Terminal實時捕獲**：使用queue機制非阻塞讀取
+5. ✅ **智能截圖升級**：基於project_json的多層匹配邏輯
+
+系統現已實現完整的本地AI開發自動化工作流。

@@ -1,12 +1,10 @@
 """
-AI 自動化開發控制器 Pro v5.3 - 完整改進版
+AI 自動化開發控制器 Pro v5.4 - 完整改進版
 改進項目：
-1. Terminal輸出完整捕獲和傳遞
-2. 優化自動截圖邏輯 - 使用現有運行程序
-3. 改進窗口管理 - 正確關閉HTML和Terminal
-4. 繁體中文化所有提示詞
-5. 跨裝置對話記錄改進
-6. 截圖邏輯修復
+1. 修復對話遷移後路徑不一致問題
+2. 修復 Token 統計消失問題
+3. 清理臨時對話檔案
+4. 優化對話記錄結構
 """
 
 import sys
@@ -93,7 +91,6 @@ try:
 except Exception as e:
     logger.critical(f"初始化失敗: {e}")
     logger.critical("請確保您有足夠的權限創建配置目錄")
-    # 不終止程式，讓用戶看到錯誤訊息
 
 # ============================================
 # 數據模型
@@ -180,13 +177,14 @@ class AIConfig:
 
 @dataclass
 class ConversationMessage:
-    """對話消息"""
+    """對話消息 - 修改版，正確保存 usage_metadata"""
     role: str
     content: str
     timestamp: str
     files: Optional[List[Dict]] = None
     metadata: Optional[Dict] = None
-    terminal_output: Optional[str] = None  # 新增：Terminal輸出
+    terminal_output: Optional[str] = None
+    usage_metadata: Optional[Dict] = None  # ⭐ 新增：直接保存 token 統計
 
 @dataclass
 class ProjectConversation:
@@ -212,7 +210,7 @@ class ProcessResult:
     screenshots: List[str] = field(default_factory=list)
     is_iteration: bool = False
     usage_metadata: Optional[Dict] = None
-    terminal_output: str = ""  # 新增：Terminal輸出
+    terminal_output: str = ""
 
 # ============================================
 # JSON Schema 定義 - 繁體中文化
@@ -259,10 +257,10 @@ def get_json_schema():
     }
 
 def get_json_system_instruction():
-    """獲取 JSON 模式的系統指令 - 繁體中文版"""
-    return """你是一位專業的程式碼助手，能夠生成完整、可運行的專案程式碼。
+    """獲取 JSON 模式的系統指令 - 繁體中文版 + Flask修復"""
+    return """你是一位專業的程式碼助手,能夠生成完整、可運行的專案程式碼。
 
-回應時，你必須輸出一個符合以下結構的有效 JSON 物件：
+回應時,你必須輸出一個符合以下結構的有效 JSON 物件:
 {
     "project_name": "描述性的專案名稱",
     "description": "專案功能的簡要描述",
@@ -273,7 +271,7 @@ def get_json_system_instruction():
         {
             "filename": "main.py",
             "filetype": "python",
-            "code": "import flask\\n\\napp = flask.Flask(__name__)\\n\\n@app.route('/')\\ndef home():\\n    return 'Hello World'\\n\\nif __name__ == '__main__':\\n    app.run()",
+            "code": "import flask\\n\\napp = flask.Flask(__name__)\\n\\n@app.route('/')\\ndef home():\\n    return 'Hello World'\\n\\nif __name__ == '__main__':\\n    app.run(host='0.0.0.0', port=5000)",
             "opens_window": false,
             "window_title": null,
             "install_requirements": ["pip install flask"],
@@ -288,67 +286,75 @@ def get_json_system_instruction():
     ]
 }
 
-重要格式規則：
-1. "code" 欄位必須包含正確格式化的程式碼，使用真實的換行符號和縮排
-2. 在 code 字串中使用實際的換行字元 (\\n) 和 Tab 字元 (\\t)，不是文字上的 \\n 字串
+重要格式要則:
+1. "code" 欄位必須包含正確格式化的程式碼,使用真實的換行符號和縮排
+2. 在 code 字串中使用實際的換行字元 (\\n) 和 Tab 字元 (\\t),不是文字上的 \\n 字串
 3. 程式碼必須是有效的 JSON 字串 - 正確跳脫引號
 4. 確保程式碼中的縮排正確保留
 5. 程式碼的每一行應該在 JSON 字串中獨立成行
 
-網頁應用規則：
-1. 對於 HTML 檔案或伺服器應用程式（Flask、Node.js 等），設定 "is_web_app": true
-2. 只有在你的程式碼包含自動開啟瀏覽器功能時，才設定 "can_open_standalone": true：
-   - Python: 使用 webbrowser.open() 或 Flask 加上 app.run(debug=False, port=5000) + webbrowser
+**CRITICAL Flask/Web Server 要則:**
+1. **絕對禁止使用 debug=True** - 這會導致在 subprocess 中運行時崩潰
+2. Flask 應用必須使用:`app.run(host='0.0.0.0', port=5000)` (不帶 debug 參數)
+3. Node.js/Express 應用也不要使用開發模式的熱重載
+4. 如果需要開發便利性,可以在代碼註釋中說明手動運行時可加 debug=True
+
+網頁應用要則:
+1. 對於 HTML 檔案或伺服器應用程式(Flask、Node.js 等),設定 "is_web_app": true
+2. 只有在你的程式碼包含自動開啟瀏覽器功能時,才設定 "can_open_standalone": true:
+   - Python: 使用 webbrowser.open() 或 Flask 加上 app.run(port=5000) + webbrowser
    - Node.js: 使用 'open' 套件或類似工具
    - HTML: 如果是可以直接開啟的獨立 HTML
-3. 如果 "can_open_standalone" 為 false 但 "is_web_app" 為 true，請提供：
-   - "server_address": 應用程式將運行的 URL（例如："http://localhost:5000"）
+3. 如果 "can_open_standalone" 為 false 但 "is_web_app" 為 true,請提供:
+   - "server_address": 應用程式將運行的 URL(例如:"http://localhost:5000")
    - "web_title": 網頁的標題
-4. 對於獨立的 HTML 檔案，將 opens_window 和 is_web_app 都設為 true
-5. 對於伺服器應用程式，控制器將處理開啟獨立瀏覽器視窗
+4. 對於獨立的 HTML 檔案,將 opens_window 和 is_web_app 都設為 true
+5. 對於伺服器應用程式,控制器將處理開啟獨立瀏覽器視窗
 
-重要規則：
+重要要則:
 1. 始終生成完整、可運行的程式碼 - 不要使用佔位符或省略號
-2. 對於 GUI 應用程式（pygame/tkinter），設定視窗標題以匹配專案名稱
-3. 對於網頁應用，確保 HTML 有適當的 <title> 標籤
+2. 對於 GUI 應用程式(pygame/tkinter),設定視窗標題以匹配專案名稱
+3. 對於網頁應用,確保 HTML 有適當的 <title> 標籤
 4. 包含所有必要的匯入和錯誤處理
-5. 正確指定檔案類型（python、javascript、html 等）
-6. 對於 GUI 應用程式或獨立 HTML 檔案，將 opens_window 設為 true
+5. 正確指定檔案類型(python、javascript、html 等)
+6. 對於 GUI 應用程式或獨立 HTML 檔案,將 opens_window 設為 true
 7. 在 install_requirements 中列出所有套件安裝命令
 8. 為每個檔案提供清晰的描述
-9. 對於多檔案專案，確保檔案正確連結
+9. 對於多檔案專案,確保檔案正確連結
 
-支援的檔案類型：
+支持的檔案類型:
 python, javascript, html, css, typescript, java, cpp, c, go, rust, ruby, php, swift, kotlin, sql, shell, yaml, json, xml, markdown, text
 
-記住：
-- 只輸出有效的 JSON，不要有額外的文字或 markdown 格式
-- 確保程式碼正確格式化，縮排正確
-- 在程式碼字串中使用真實的換行符號，而不是 \\n 文字
-- 對於網頁應用，仔細考慮獨立瀏覽器視窗的能力
+記住:
+- 只輸出有效的 JSON,不要有額外的文字或 markdown 格式
+- 確保程式碼正確格式化,縮排正確
+- 在程式碼字串中使用真實的換行符號,而不是 \\n 文字
+- 對於網頁應用,仔細考慮獨立瀏覽器視窗的能力
+- **Flask/Web 伺服器絕對不要使用 debug=True**
 
-對於 HTML + 後端專案的特別注意事項：
-1. 確保後端伺服器（Flask/Node.js）正確配置 CORS 和靜態檔案服務
+對於 HTML + 後端專案的特別注意事項:
+1. 確保後端伺服器(Flask/Node.js)正確配置 CORS 和靜態檔案服務
 2. HTML 檔案應該正確引用後端 API 端點
 3. 提供完整的前後端連接測試程式碼
-4. 在 run_instructions 中明確說明：
+4. 在 run_instructions 中明確說明:
    - 先啟動後端伺服器
    - 後端服務地址
    - 前端如何訪問
-5. 對於需要同時運行前後端的專案：
+5. 對於需要同時運行前後端的專案:
    - 後端檔案設定 is_web_app: true, can_open_standalone: false
    - 提供準確的 server_address 和 web_title
    - 確保後端程式碼包含適當的路由和 CORS 設定
-6. 測試程式碼應該驗證：
+   - **後端絕對不要使用 debug=True**
+6. 測試程式碼應該驗證:
    - 後端伺服器啟動成功
    - API 端點可訪問
    - 前後端數據交互正常
 
-Terminal 輸出和除錯資訊：
+Terminal 輸出和除錯資訊:
 1. 所有重要的執行步驟都應該有 print() 或 console.log() 輸出
 2. 包含適當的錯誤處理和錯誤訊息輸出
 3. 啟動時輸出服務地址和狀態資訊
-4. 對於網頁應用，輸出 "伺服器運行於: http://localhost:PORT"
+4. 對於網頁應用,輸出 "伺服器運行於: http://localhost:PORT"
 """
 
 # ============================================
@@ -356,7 +362,7 @@ Terminal 輸出和除錯資訊：
 # ============================================
 
 class ConfigManager:
-    """配置文件管理器 - 改進版，增強錯誤處理"""
+    """配置文件管理器 - 改進版,增強錯誤處理"""
     
     @staticmethod
     def ensure_config_dir():
@@ -371,15 +377,13 @@ class ConfigManager:
     @staticmethod
     def load() -> AIConfig:
         """讀取配置文件"""
-        # 確保目錄存在
         if not ConfigManager.ensure_config_dir():
-            logger.warning("配置目錄創建失敗，使用默認配置")
+            logger.warning("配置目錄創建失敗,使用默認配置")
             return AIConfig()
         
         if not CONFIG_FILE.exists():
-            logger.info("配置文件不存在，創建默認配置")
+            logger.info("配置文件不存在,創建默認配置")
             default_config = AIConfig()
-            # 嘗試保存默認配置
             ConfigManager.save(default_config)
             return default_config
         
@@ -396,7 +400,6 @@ class ConfigManager:
     def save(config: AIConfig) -> bool:
         """儲存配置文件"""
         try:
-            # 確保目錄存在
             if not ConfigManager.ensure_config_dir():
                 raise IOError("無法創建配置目錄")
             
@@ -409,11 +412,11 @@ class ConfigManager:
             return False
 
 # ============================================
-# 對話歷史管理
+# 對話歷史管理 - 修復版
 # ============================================
 
 class ConversationManager:
-    """對話歷史管理器"""
+    """對話歷史管理器 - 修復 token 統計保存問題"""
     
     @staticmethod
     def get_conversation_file(project_dir: str) -> Path:
@@ -424,7 +427,7 @@ class ConversationManager:
     
     @staticmethod
     def load_conversation(project_dir: str) -> ProjectConversation:
-        """載入專案對話歷史"""
+        """載入專案對話歷史 - 正確處理 usage_metadata"""
         conv_file = ConversationManager.get_conversation_file(project_dir)
         
         if not conv_file.exists():
@@ -442,7 +445,21 @@ class ConversationManager:
                 data = json.load(f)
                 messages = []
                 for msg_data in data.get('messages', []):
-                    messages.append(ConversationMessage(**msg_data))
+                    # ⭐ 關鍵修復：正確處理 usage_metadata
+                    usage_metadata = msg_data.get('usage_metadata')
+                    if not usage_metadata and msg_data.get('metadata'):
+                        # 向後兼容：從 metadata 中提取 usage_metadata
+                        usage_metadata = msg_data['metadata'].get('usage_metadata')
+                    
+                    messages.append(ConversationMessage(
+                        role=msg_data['role'],
+                        content=msg_data['content'],
+                        timestamp=msg_data['timestamp'],
+                        files=msg_data.get('files'),
+                        metadata=msg_data.get('metadata'),
+                        terminal_output=msg_data.get('terminal_output'),
+                        usage_metadata=usage_metadata  # ⭐ 直接保存
+                    ))
                 
                 return ProjectConversation(
                     project_dir=data['project_dir'],
@@ -462,15 +479,29 @@ class ConversationManager:
     
     @staticmethod
     def save_conversation(conversation: ProjectConversation) -> bool:
-        """儲存對話歷史"""
+        """儲存對話歷史 - 正確序列化 usage_metadata"""
         try:
             conv_file = ConversationManager.get_conversation_file(conversation.project_dir)
             conversation.updated_at = datetime.now().isoformat()
             
+            # ⭐ 關鍵修復：使用自定義序列化保留 usage_metadata
+            messages_data = []
+            for msg in conversation.messages:
+                msg_dict = {
+                    'role': msg.role,
+                    'content': msg.content,
+                    'timestamp': msg.timestamp,
+                    'files': msg.files,
+                    'metadata': msg.metadata,
+                    'terminal_output': msg.terminal_output,
+                    'usage_metadata': msg.usage_metadata  # ⭐ 直接保存
+                }
+                messages_data.append(msg_dict)
+            
             data = {
                 'project_dir': conversation.project_dir,
                 'project_name': conversation.project_name,
-                'messages': [asdict(msg) for msg in conversation.messages],
+                'messages': messages_data,
                 'created_at': conversation.created_at,
                 'updated_at': conversation.updated_at
             }
@@ -486,8 +517,9 @@ class ConversationManager:
     
     @staticmethod
     def add_message(project_dir: str, role: str, content: str, files: Optional[List[Dict]] = None, 
-                   metadata: Optional[Dict] = None, terminal_output: Optional[str] = None):
-        """添加消息到對話歷史"""
+                   metadata: Optional[Dict] = None, terminal_output: Optional[str] = None,
+                   usage_metadata: Optional[Dict] = None):  # ⭐ 新增參數
+        """添加消息到對話歷史 - 支持 usage_metadata"""
         conversation = ConversationManager.load_conversation(project_dir)
         
         message = ConversationMessage(
@@ -496,11 +528,26 @@ class ConversationManager:
             timestamp=datetime.now().isoformat(),
             files=files,
             metadata=metadata,
-            terminal_output=terminal_output
+            terminal_output=terminal_output,
+            usage_metadata=usage_metadata  # ⭐ 直接保存
         )
         
         conversation.messages.append(message)
         ConversationManager.save_conversation(conversation)
+    
+    @staticmethod
+    def delete_conversation_file(project_dir: str) -> bool:
+        """刪除對話檔案 - 用於清理臨時對話"""
+        try:
+            conv_file = ConversationManager.get_conversation_file(project_dir)
+            if conv_file.exists():
+                conv_file.unlink()
+                logger.info(f"已刪除對話檔案: {conv_file}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"刪除對話檔案失敗: {e}")
+            return False
 
 # ============================================
 # 專案管理模塊
@@ -655,14 +702,14 @@ class GeminiAI:
             
         elif config.connection_method == 'gcloud_auth':
             if not HAS_GOOGLE_AUTH:
-                raise ImportError("缺少 google-auth 套件，請執行: pip install google-auth")
+                raise ImportError("缺少 google-auth 套件,請執行: pip install google-auth")
             try:
                 credentials, project_id = google.auth.default()
                 genai.configure(credentials=credentials)
                 logger.info(f"已使用 Google Cloud Auth 連接 (專案: {project_id})")
             except google.auth.exceptions.DefaultCredentialsError:
                 raise ConnectionError(
-                    "找不到 Google Cloud 憑證，請執行: gcloud auth application-default login"
+                    "找不到 Google Cloud 憑證,請執行: gcloud auth application-default login"
                 )
         else:
             raise ValueError(f"不支持的連接模式: {config.connection_method}")
@@ -717,13 +764,11 @@ class GeminiAI:
             
             content_parts = []
             
-            # 添加Terminal輸出（如果有）
             if terminal_output:
                 terminal_part = f"\n=== 程式執行輸出 (Terminal Output) ===\n{terminal_output}\n=== 輸出結束 ===\n"
                 content_parts.append(terminal_part)
                 logger.info("已添加Terminal輸出到提示詞")
             
-            # 處理上傳的檔案
             if files:
                 for file_data in files:
                     file_type = file_data.get('type', '')
@@ -811,7 +856,7 @@ class GeminiAI:
                     json_data = json.loads(response_text.strip())
                     logger.info("修復後成功解析 JSON")
                 except:
-                    logger.error("無法解析為JSON，返回原始文本")
+                    logger.error("無法解析為JSON,返回原始文本")
             
             usage_metadata = None
             if hasattr(response, 'usage_metadata'):
@@ -848,7 +893,7 @@ class VSCodeController:
         }
         
         try:
-            logger.info(f"正在啟動 VS Code，資料夾: {folder_path}")
+            logger.info(f"正在啟動 VS Code,資料夾: {folder_path}")
             
             if filenames and len(filenames) > 0:
                 first_file = Path(folder_path) / filenames[0]
@@ -926,7 +971,7 @@ class VSCodeController:
             logger.info(result["message"])
             
         except FileNotFoundError:
-            result["message"] = "找不到 'code' 命令，請確保 VS Code 已安裝並加入 PATH"
+            result["message"] = "找不到 'code' 命令,請確保 VS Code 已安裝並加入 PATH"
             logger.error(result["message"])
         except Exception as e:
             result["message"] = f"VS Code 控制失敗: {str(e)}"
@@ -948,7 +993,6 @@ class ScreenCapture:
         screenshots = []
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        # 從project_json提取所有可能的視窗標題
         all_window_titles = []
         if project_json and 'files' in project_json:
             for file in project_json['files']:
@@ -957,14 +1001,12 @@ class ScreenCapture:
                 if file.get('window_title'):
                     all_window_titles.append(file['window_title'])
         
-        # 合併傳入的window_titles
         if window_titles:
             all_window_titles.extend(window_titles)
         
-        # 去重
         all_window_titles = list(set(all_window_titles))
         
-        logger.info(f"開始擷取程式視窗，指定標題: {all_window_titles}, 專案: {project_name}")
+        logger.info(f"開始擷取程式視窗,指定標題: {all_window_titles}, 專案: {project_name}")
         
         all_windows = pwc.getAllWindows()
         captured_titles = set()
@@ -972,7 +1014,6 @@ class ScreenCapture:
         
         browser_keywords = ['chrome', 'edge', 'firefox', 'safari', 'brave']
         
-        # 從專案名稱生成可能的視窗標題變體
         project_variants = []
         if project_name:
             project_variants.append(project_name.lower())
@@ -990,13 +1031,11 @@ class ScreenCapture:
             should_capture = False
             capture_reason = ""
             
-            # 1. 檢查 VS Code 視窗
             if project_name and 'visual studio code' in window_title_lower:
                 if project_name.lower() in window_title_lower:
                     should_capture = True
                     capture_reason = "VS Code - 專案視窗"
             
-            # 2. 檢查瀏覽器視窗 - 使用all_window_titles
             if not should_capture:
                 for browser in browser_keywords:
                     if browser in window_title_lower:
@@ -1008,7 +1047,6 @@ class ScreenCapture:
                         if should_capture:
                             break
             
-            # 3. 直接匹配指定的視窗標題
             if not should_capture and all_window_titles:
                 for target_title in all_window_titles:
                     if target_title.lower() in window_title_lower:
@@ -1016,7 +1054,6 @@ class ScreenCapture:
                         capture_reason = f"直接匹配 - {target_title}"
                         break
             
-            # 4. 使用專案名稱變體進行模糊匹配(排除 VS Code 和瀏覽器)
             if not should_capture and project_variants:
                 is_vscode = 'visual studio code' in window_title_lower
                 is_browser = any(browser in window_title_lower for browser in browser_keywords)
@@ -1068,9 +1105,9 @@ class ScreenCapture:
             except Exception as e:
                 logger.warning(f"擷取視窗 '{window.title}' 失敗: {e}")
         
-        logger.info(f"擷取完成，共 {len(screenshots)} 個視窗")
+        logger.info(f"擷取完成,共 {len(screenshots)} 個視窗")
         if not screenshots and all_window_titles:
-            logger.info(f"提示：確保應用程式已在瀏覽器中開啟，且標題包含相關關鍵字: {all_window_titles}")
+            logger.info(f"提示:確保應用程式已在瀏覽器中開啟,且標題包含相關關鍵字: {all_window_titles}")
         
         return screenshots
 
@@ -1215,13 +1252,14 @@ class CodeProcessor:
         return saved_files, updated_files
 
 # ============================================
-# 程式執行管理 - 改進版，增加Terminal輸出捕獲
+# 程式執行管理 - 改進版,增加Terminal輸出捕獲
 # ============================================
 
 class ProgramManager:
     """管理執行中的程式 - 增強版"""
     
     running_programs = {}
+    browser_processes = {}  # 新增:追蹤瀏覽器進程
     
     @classmethod
     def add_program(cls, process, filename, folder_path, window_title=None, output_queue=None):
@@ -1233,10 +1271,38 @@ class ProgramManager:
             'window_title': window_title,
             'start_time': datetime.now(),
             'pid': process.pid,
-            'output_queue': output_queue,  # 用於捕獲輸出
-            'terminal_output': []  # 儲存所有輸出
+            'output_queue': output_queue,
+            'terminal_output': []
         }
         logger.info(f"已添加程式到管理列表: PID {process.pid}, 檔案 {filename}")
+    
+    @classmethod
+    def add_browser_process(cls, process, project_dir: str):
+        """添加瀏覽器進程到追蹤"""
+        cls.browser_processes[project_dir] = {
+            'process': process,
+            'pid': process.pid,
+            'start_time': datetime.now()
+        }
+        logger.info(f"已追蹤瀏覽器進程: PID {process.pid} for {project_dir}")
+    
+    @classmethod
+    def close_project_browsers(cls, project_dir: str):
+        """關閉專案相關的瀏覽器視窗"""
+        if project_dir in cls.browser_processes:
+            browser_info = cls.browser_processes[project_dir]
+            try:
+                process = browser_info['process']
+                if process.poll() is None:  # 進程還在運行
+                    process.terminate()
+                    time.sleep(0.3)
+                    if process.poll() is None:
+                        process.kill()
+                logger.info(f"已關閉舊瀏覽器: PID {browser_info['pid']}")
+            except Exception as e:
+                logger.warning(f"關閉瀏覽器失敗: {e}")
+            finally:
+                del cls.browser_processes[project_dir]
     
     @classmethod
     def get_terminal_output(cls, pid: int) -> str:
@@ -1286,7 +1352,7 @@ class ProgramManager:
                     'window_title': info.get('window_title'),
                     'status': 'running',
                     'run_time': run_time,
-                    'terminal_output': '\n'.join(info['terminal_output'][-50:])  # 最近50行
+                    'terminal_output': '\n'.join(info['terminal_output'][-50:])
                 })
             else:
                 to_remove.append(pid)
@@ -1333,14 +1399,14 @@ class ProgramManager:
     
     @classmethod
     def run_file(cls, filepath: str, folder_path: str, file_info: FileOutput = None):
-        """執行檔案 - 改進版，捕獲輸出"""
+        """執行檔案 - 改進版,捕獲輸出"""
         file_ext = Path(filepath).suffix.lower()
         window_title = file_info.window_title if file_info else None
         
         try:
             if file_info and file_info.is_web_app:
                 if file_ext == '.html':
-                    cls.open_standalone_browser(f'file:///{filepath}', file_info.web_title or "Web App")
+                    cls.open_standalone_browser(f'file:///{filepath}', file_info.web_title or "Web App", folder_path)
                     return None
                     
                 elif file_info.can_open_standalone:
@@ -1361,7 +1427,7 @@ class ProgramManager:
                     
                     if file_info.server_address:
                         time.sleep(2)
-                        cls.open_standalone_browser(file_info.server_address, file_info.web_title or "Web App")
+                        cls.open_standalone_browser(file_info.server_address, file_info.web_title or "Web App", folder_path)
                         
                 cls.add_program(process, Path(filepath).name, folder_path, window_title, output_queue)
                 return process
@@ -1391,44 +1457,48 @@ class ProgramManager:
     
     @classmethod
     def _run_python(cls, filepath: str, folder_path: str) -> Tuple[subprocess.Popen, queue.Queue]:
-        """執行 Python 檔案 - 捕獲輸出"""
+        """執行 Python 檔案 - 捕獲輸出 + 禁用buffering"""
         output_queue = queue.Queue()
         
+        # 設置環境變量禁用Python buffering
+        env = os.environ.copy()
+        env['PYTHONUNBUFFERED'] = '1'
+        
         if platform.system() == 'Windows':
-            # Windows: 創建新的可見控制台視窗
             process = subprocess.Popen(
-                [sys.executable, str(filepath)],
+                [sys.executable, '-u', str(filepath)],  # -u 禁用buffering
                 cwd=folder_path,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 creationflags=subprocess.CREATE_NEW_CONSOLE,
                 text=True,
                 encoding='utf-8',
-                bufsize=1
+                bufsize=1,
+                env=env
             )
         else:
-            # macOS/Linux: 使用終端機打開
             if platform.system() == 'Darwin':
                 process = subprocess.Popen(
-                    ['osascript', '-e', f'tell application "Terminal" to do script "cd {folder_path} && python3 {filepath}"'],
+                    ['osascript', '-e', f'tell application "Terminal" to do script "cd {folder_path} && python3 -u {filepath}"'],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
                     encoding='utf-8',
-                    bufsize=1
+                    bufsize=1,
+                    env=env
                 )
             else:
                 process = subprocess.Popen(
-                    ['x-terminal-emulator', '-e', f'cd {folder_path} && python3 {filepath}'],
+                    ['x-terminal-emulator', '-e', f'cd {folder_path} && python3 -u {filepath}'],
                     cwd=folder_path,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
                     encoding='utf-8',
-                    bufsize=1
+                    bufsize=1,
+                    env=env
                 )
         
-        # 啟動線程讀取輸出
         def read_output():
             try:
                 for line in iter(process.stdout.readline, ''):
@@ -1469,8 +1539,14 @@ class ProgramManager:
         return process, output_queue
     
     @classmethod
-    def open_standalone_browser(cls, url: str, title: str = "Web App"):
-        """開啟獨立的瀏覽器視窗(不是新分頁)"""
+    def open_standalone_browser(cls, url: str, title: str = "Web App", project_dir: str = None):
+        """開啟獨立的瀏覽器視窗(不是新分頁) - 返回進程以便追蹤"""
+        # 如果有專案目錄,先關閉舊的瀏覽器
+        if project_dir:
+            cls.close_project_browsers(project_dir)
+        
+        browser_process = None
+        
         try:
             if platform.system() == 'Windows':
                 chrome_paths = [
@@ -1486,7 +1562,7 @@ class ProgramManager:
                 
                 for chrome_path in chrome_paths:
                     if os.path.exists(chrome_path):
-                        subprocess.Popen([
+                        browser_process = subprocess.Popen([
                             chrome_path,
                             '--new-window',
                             f'--app={url}',
@@ -1494,28 +1570,30 @@ class ProgramManager:
                             f'--user-data-dir={CONFIG_DIR / "chrome_profile"}',
                         ])
                         logger.info(f"使用 Chrome 獨立視窗模式開啟: {url}")
-                        return
+                        break
                 
-                for edge_path in edge_paths:
-                    if os.path.exists(edge_path):
-                        subprocess.Popen([
-                            edge_path,
-                            '--new-window',
-                            f'--app={url}',
-                            '--window-size=1200,800',
-                            f'--user-data-dir={CONFIG_DIR / "edge_profile"}',
-                        ])
-                        logger.info(f"使用 Edge 獨立視窗模式開啟: {url}")
-                        return
+                if not browser_process:
+                    for edge_path in edge_paths:
+                        if os.path.exists(edge_path):
+                            browser_process = subprocess.Popen([
+                                edge_path,
+                                '--new-window',
+                                f'--app={url}',
+                                '--window-size=1200,800',
+                                f'--user-data-dir={CONFIG_DIR / "edge_profile"}',
+                            ])
+                            logger.info(f"使用 Edge 獨立視窗模式開啟: {url}")
+                            break
                 
-                import webbrowser
-                webbrowser.open_new(url)
-                logger.warning("使用預設瀏覽器開啟新視窗")
+                if not browser_process:
+                    import webbrowser
+                    webbrowser.open_new(url)
+                    logger.warning("使用預設瀏覽器開啟新視窗")
                 
             elif platform.system() == 'Darwin':
                 chrome_app = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
                 if os.path.exists(chrome_app):
-                    subprocess.Popen([
+                    browser_process = subprocess.Popen([
                         chrome_app,
                         '--new-window',
                         f'--app={url}',
@@ -1539,7 +1617,7 @@ class ProgramManager:
                     try:
                         result = subprocess.run(['which', browser_cmd], capture_output=True, text=True)
                         if result.returncode == 0:
-                            subprocess.Popen([
+                            browser_process = subprocess.Popen([
                                 browser_cmd,
                                 '--new-window',
                                 f'--app={url}',
@@ -1547,25 +1625,32 @@ class ProgramManager:
                                 f'--user-data-dir={CONFIG_DIR / "chrome_profile"}'
                             ])
                             logger.info(f"使用 {browser_name} app 模式開啟: {url}")
-                            return
+                            break
                     except:
                         continue
                 
-                import webbrowser
-                webbrowser.open_new(url)
-                logger.warning("使用預設瀏覽器開啟")
+                if not browser_process:
+                    import webbrowser
+                    webbrowser.open_new(url)
+                    logger.warning("使用預設瀏覽器開啟")
+            
+            # 追蹤瀏覽器進程
+            if browser_process and project_dir:
+                cls.add_browser_process(browser_process, project_dir)
                 
         except Exception as e:
             logger.error(f"開啟獨立瀏覽器失敗: {e}")
             import webbrowser
             webbrowser.open_new(url)
+        
+        return browser_process
 
 # ============================================
-# 主要處理流程
+# 主要處理流程 - 修復版
 # ============================================
 
 class ProcessManager:
-    """主要處理流程管理器"""
+    """主要處理流程管理器 - 修復對話遷移和 token 統計"""
     
     @staticmethod
     def run_automation_process(
@@ -1577,14 +1662,13 @@ class ProcessManager:
         attach_screenshot: bool = False,
         attach_terminal: bool = False
     ) -> ProcessResult:
-        """執行完整的自動化流程"""
+        """執行完整的自動化流程 - 修復版"""
         
         result = ProcessResult(success=False, is_iteration=is_iteration)
         
         try:
-            # 如果是迭代模式，自動載入專案所有檔案
             if is_iteration:
-                logger.info("迭代模式：自動載入專案所有檔案")
+                logger.info("迭代模式:自動載入專案所有檔案")
                 project_files = ProjectManager.load_project_files(folder_path)
                 
                 if not files:
@@ -1593,7 +1677,6 @@ class ProcessManager:
                 files.extend(project_files)
                 logger.info(f"已附加 {len(project_files)} 個專案檔案")
             
-            # 獲取Terminal輸出
             terminal_output = None
             if attach_terminal:
                 terminal_output = ProgramManager.get_all_terminal_output()
@@ -1601,7 +1684,7 @@ class ProcessManager:
                     logger.info("已附加Terminal輸出到AI請求")
                     result.terminal_output = terminal_output
             
-            # 添加用戶消息到對話歷史
+            # ⭐ 修復:在正確的時機保存用戶消息
             ConversationManager.add_message(
                 folder_path,
                 'user',
@@ -1610,18 +1693,15 @@ class ProcessManager:
                 terminal_output=terminal_output
             )
             
-            # 處理自動截圖（迭代模式）
             if is_iteration and attach_screenshot:
                 project_info = ProjectManager.load_project_info(folder_path)
                 if project_info:
-                    logger.info("迭代模式：檢查是否有運行中的程序")
+                    logger.info("迭代模式:檢查是否有運行中的程序")
                     
-                    # 檢查是否有運行中的程序
                     running_programs = ProgramManager.check_programs()
                     
                     if not running_programs or all(p['status'] != 'running' for p in running_programs):
-                        # 沒有運行中的程序，啟動主程式
-                        logger.info("沒有運行中的程序，啟動主程式")
+                        logger.info("沒有運行中的程序,啟動主程式")
                         main_file = project_info.get('main_file')
                         if main_file:
                             main_file_path = Path(folder_path) / main_file
@@ -1635,15 +1715,13 @@ class ProcessManager:
                             if main_file_info:
                                 ProgramManager.run_file(str(main_file_path), folder_path, main_file_info)
                                 
-                                # 等待程式啟動
                                 if main_file_info.is_web_app:
                                     time.sleep(4)
                                 else:
                                     time.sleep(3)
                     else:
-                        logger.info("已有運行中的程序，直接使用")
+                        logger.info("已有運行中的程序,直接使用")
                     
-                    # 擷取截圖
                     window_titles = []
                     for file_data in project_info.get('files', []):
                         if file_data.get('web_title'):
@@ -1655,7 +1733,6 @@ class ProcessManager:
                         project_json=project_info
                     )
                     
-                    # 將截圖轉為檔案格式
                     screenshot_files = []
                     for screenshot in screenshots:
                         try:
@@ -1676,7 +1753,6 @@ class ProcessManager:
                     
                     result.screenshots = [s['filename'] for s in screenshots]
             
-            # Step 1: 呼叫 AI 生成程式碼
             logger.info("Step 1: 呼叫 Gemini AI...")
             if files:
                 logger.info(f"包含 {len(files)} 個檔案")
@@ -1690,7 +1766,6 @@ class ProcessManager:
             result.ai_response_json = json_data
             result.usage_metadata = usage_metadata
             
-            # Step 2: 解析 AI 回應
             logger.info("Step 2: 解析 AI 回應...")
             try:
                 if json_data:
@@ -1744,6 +1819,7 @@ class ProcessManager:
                 if "```" in ai_response:
                     result.output += "\n=== 🔍 檢測到程式碼區塊 ===\n您可以手動複製下方 AI 回應中的程式碼。"
                 
+                # ⭐ 修復:使用正確的路徑保存錯誤消息
                 ConversationManager.add_message(
                     folder_path,
                     'assistant',
@@ -1753,7 +1829,6 @@ class ProcessManager:
                 
                 return result
             
-            # Step 3: 終止舊程式(迭代模式下)
             if is_iteration:
                 logger.info("Step 3: 終止舊程式...")
                 terminated = ProgramManager.terminate_all()
@@ -1761,7 +1836,6 @@ class ProcessManager:
                     logger.info(f"已終止 {len(terminated)} 個程式")
                     time.sleep(1)
             
-            # Step 4: 安裝套件
             logger.info("Step 4: 安裝必要套件...")
             all_requirements = []
             for file in project.files:
@@ -1777,26 +1851,45 @@ class ProcessManager:
             result.files_created = saved_files
             result.files_updated = updated_files
             
-            # Step 6: 啟動 VS Code
-            logger.info("Step 6: 啟動 VS Code...")
+            # ⭐ 關鍵修復:確定最終的專案目錄
             if is_iteration:
-                project_dir = folder_path
+                final_project_dir = folder_path
             else:
-                project_dir = str(Path(folder_path) / project.project_name)
+                final_project_dir = str(Path(folder_path) / project.project_name)
+            
+            # ⭐ 關鍵修復:處理對話遷移
+            if not is_iteration and folder_path != final_project_dir:
+                logger.info("新建專案:遷移對話記錄...")
+                temp_conversation = ConversationManager.load_conversation(folder_path)
+                if temp_conversation.messages:
+                    # 更新專案目錄和名稱
+                    temp_conversation.project_dir = final_project_dir
+                    temp_conversation.project_name = project.project_name
+                    # 保存到新路徑
+                    ConversationManager.save_conversation(temp_conversation)
+                    logger.info(f"已遷移 {len(temp_conversation.messages)} 條對話記錄")
+                    
+                    # ⭐ 清理臨時對話檔案
+                    try:
+                        ConversationManager.delete_conversation_file(folder_path)
+                        logger.info("已清理臨時對話檔案")
+                    except Exception as e:
+                        logger.warning(f"清理臨時對話檔案失敗: {e}")
+            
+            logger.info("Step 6: 啟動 VS Code...")
             
             filenames_to_open = [f.filename for f in project.files[:3]]
-            vscode_result = VSCodeController.launch_and_open(project_dir, filenames_to_open)
+            vscode_result = VSCodeController.launch_and_open(final_project_dir, filenames_to_open)
             
-            # Step 7: 執行主檔案
             logger.info("Step 7: 執行程式...")
             execution_status = "尚未執行"
             execution_detail = ""
             window_titles_to_capture = []
             
-            ProjectManager.add_to_project_list(project_dir, project.project_name, project.description)
+            ProjectManager.add_to_project_list(final_project_dir, project.project_name, project.description)
             
             if project.main_file:
-                main_file_path = Path(project_dir) / project.main_file
+                main_file_path = Path(final_project_dir) / project.main_file
                 
                 main_file_info = None
                 for file in project.files:
@@ -1810,7 +1903,7 @@ class ProcessManager:
                     
                     process = ProgramManager.run_file(
                         str(main_file_path),
-                        project_dir,
+                        final_project_dir,
                         main_file_info
                     )
                     
@@ -1849,18 +1942,17 @@ class ProcessManager:
                                     if program_screenshots:
                                         execution_detail += f"\n已擷取 {len(program_screenshots)} 個視窗"
                                     else:
-                                        execution_detail += "\n注意：視窗可能需要更多時間才能顯示"
+                                        execution_detail += "\n注意:視窗可能需要更多時間才能顯示"
                                         
                             if main_file_info.is_web_app:
                                 if main_file_info.server_address:
                                     execution_detail += f"\n🌐 網頁地址: {main_file_info.server_address}"
                                 if main_file_info.web_title:
-                                    execution_detail += f"\n🔖 網頁標題: {main_file_info.web_title}"
+                                    execution_detail += f"\n📖 網頁標題: {main_file_info.web_title}"
                                 if not main_file_info.can_open_standalone:
                                     execution_detail += "\n✅ 已自動開啟獨立瀏覽器視窗"
                         
                         elif poll_result == 0:
-                            # 獲取輸出
                             terminal_out = ProgramManager.get_terminal_output(process.pid)
                             execution_status = "✅ 程式執行完成"
                             execution_detail = f"輸出:\n{terminal_out}" if terminal_out else "程式已結束"
@@ -1885,12 +1977,11 @@ class ProcessManager:
                             for screenshot in program_screenshots:
                                 result.screenshots.append(screenshot['filename'])
             
-            # 整合執行結果
             result.output = f"""
 === 🎉 專案{'迭代' if is_iteration else '生成'}成功 ===
 📦 專案名稱: {project.project_name}
 📝 描述: {project.description}
-📁 專案位置: {project_dir}
+📂 專案位置: {final_project_dir}
 📄 檔案數量: {len(project.files)}
 🎯 主檔案: {project.main_file or '無指定'}
 
@@ -1899,7 +1990,7 @@ class ProcessManager:
             for file in project.files:
                 file_icon = "🐍" if file.filetype == "python" else "📄"
                 window_info = f" (視窗: {file.window_title})" if file.opens_window and file.window_title else ""
-                update_status = " [已更新]" if str(Path(project_dir) / file.filename) in updated_files else " [新建]"
+                update_status = " [已更新]" if str(Path(final_project_dir) / file.filename) in updated_files else " [新建]"
                 result.output += f"{file_icon} {file.filename}{update_status} - {file.description or file.filetype}{window_info}\n"
             
             result.output += f"""
@@ -1951,23 +2042,23 @@ class ProcessManager:
 1. 查看 VS Code 視窗以編輯程式碼
 2. 使用「延遲 5 秒後擷取」來擷取運行畫面
 3. 查看「執行中的程式」監控程式狀態
-4. 如果是圖形程式，應該會看到新視窗出現
+4. 如果是圖形程式,應該會看到新視窗出現
 5. 查看「監控」中的 Terminal 輸出以了解程式運行狀況
 """
             
             result.success = True
             
-            # 添加成功的AI回應到對話歷史
+            # ⭐ 關鍵修復:使用最終路徑和正確的 usage_metadata 保存AI回應
             ConversationManager.add_message(
-                folder_path,
+                final_project_dir,  # ✅ 使用最終專案路徑
                 'assistant',
                 result.output,
                 metadata={
                     'project_name': project.project_name,
-                    'files_count': len(project.files),
-                    'usage_metadata': usage_metadata
+                    'files_count': len(project.files)
                 },
-                terminal_output=result.terminal_output
+                terminal_output=result.terminal_output,
+                usage_metadata=usage_metadata  # ⭐ 直接傳遞 usage_metadata
             )
             
         except Exception as e:
@@ -1979,6 +2070,7 @@ class ProcessManager:
             if not result.ai_response:
                 result.ai_response = "無法獲取 AI 回應"
             
+            # 錯誤情況下也保存消息
             ConversationManager.add_message(
                 folder_path,
                 'assistant',
@@ -2008,7 +2100,6 @@ def handle_config():
             return jsonify(asdict(config))
         except Exception as e:
             logger.error(f"載入配置時發生錯誤: {e}")
-            # 返回默認配置
             default_config = AIConfig()
             return jsonify(asdict(default_config))
     
@@ -2024,7 +2115,7 @@ def handle_config():
             if success:
                 return jsonify({'success': True, 'message': '配置已儲存'})
             else:
-                return jsonify({'success': False, 'error': '儲存失敗，請檢查權限'}), 500
+                return jsonify({'success': False, 'error': '儲存失敗,請檢查權限'}), 500
         except Exception as e:
             logger.error(f"保存配置時發生錯誤: {e}")
             return jsonify({'success': False, 'error': f'保存失敗: {str(e)}'}), 500
@@ -2075,6 +2166,20 @@ def load_project():
         project_structure = ProjectManager.get_project_structure(project_dir)
         conversation = ConversationManager.load_conversation(project_dir)
         
+        # ⭐ 修復:正確序列化對話消息,保留 usage_metadata
+        messages_data = []
+        for msg in conversation.messages:
+            msg_dict = {
+                'role': msg.role,
+                'content': msg.content,
+                'timestamp': msg.timestamp,
+                'files': msg.files,
+                'metadata': msg.metadata,
+                'terminal_output': msg.terminal_output,
+                'usage_metadata': msg.usage_metadata  # ⭐ 直接傳遞
+            }
+            messages_data.append(msg_dict)
+        
         return jsonify({
             'success': True,
             'project_info': project_info,
@@ -2082,7 +2187,7 @@ def load_project():
             'project_structure': project_structure,
             'files_count': len(project_files),
             'conversation': {
-                'messages': [asdict(msg) for msg in conversation.messages],
+                'messages': messages_data,
                 'created_at': conversation.created_at,
                 'updated_at': conversation.updated_at
             }
@@ -2103,11 +2208,26 @@ def get_conversation(project_dir):
     """獲取專案對話歷史"""
     try:
         conversation = ConversationManager.load_conversation(project_dir)
+        
+        # ⭐ 修復:正確序列化,保留 usage_metadata
+        messages_data = []
+        for msg in conversation.messages:
+            msg_dict = {
+                'role': msg.role,
+                'content': msg.content,
+                'timestamp': msg.timestamp,
+                'files': msg.files,
+                'metadata': msg.metadata,
+                'terminal_output': msg.terminal_output,
+                'usage_metadata': msg.usage_metadata
+            }
+            messages_data.append(msg_dict)
+        
         return jsonify({
             'success': True,
             'conversation': {
                 'project_name': conversation.project_name,
-                'messages': [asdict(msg) for msg in conversation.messages],
+                'messages': messages_data,
                 'created_at': conversation.created_at,
                 'updated_at': conversation.updated_at
             }
@@ -2144,7 +2264,8 @@ def delete_project(project_path):
         if success:
             return jsonify({
                 'success': True,
-                'message': '專案已從列表移除'
+                'message': '專案已從列表移除',
+                'deleted_path': project_path
             })
         else:
             return jsonify({
@@ -2170,7 +2291,7 @@ def run_process():
         files = data.get('files', [])
         is_iteration = data.get('is_iteration', False)
         attach_screenshot = data.get('attach_screenshot', False)
-        attach_terminal = data.get('attach_terminal', False)  # 新增：是否附加Terminal輸出
+        attach_terminal = data.get('attach_terminal', False)
         
         if not all([folder_path, prompt]):
             return jsonify({
@@ -2203,7 +2324,7 @@ def run_process():
             'screenshots': result.screenshots,
             'is_iteration': result.is_iteration,
             'usage_metadata': result.usage_metadata,
-            'terminal_output': result.terminal_output  # 新增：返回Terminal輸出
+            'terminal_output': result.terminal_output
         }
         
         if result.project_data:
@@ -2231,13 +2352,13 @@ def run_process():
 
 @app.route('/capture-screenshots', methods=['POST'])
 def capture_screenshots():
-    """擷取螢幕畫面 - 改進版，使用project_json"""
+    """擷取螢幕畫面 - 改進版,使用project_json"""
     try:
         data = request.get_json() or {}
         capture_mode = data.get('mode', 'programs')
         window_titles = data.get('window_titles', [])
         project_name = data.get('project_name')
-        project_json = data.get('project_json')  # 新增：接收project_json
+        project_json = data.get('project_json')
         
         screenshots = []
         
@@ -2250,7 +2371,7 @@ def capture_screenshots():
                 program_screenshots = ScreenCapture.capture_running_programs(
                     window_titles, 
                     project_name,
-                    project_json  # 傳遞project_json
+                    project_json
                 )
                 screenshots.extend(program_screenshots)
             else:
@@ -2267,7 +2388,7 @@ def capture_screenshots():
                 )
                 screenshots.extend(program_screenshots)
         
-        logger.info(f"擷取完成，共 {len(screenshots)} 張截圖，模式: {capture_mode}")
+        logger.info(f"擷取完成,共 {len(screenshots)} 張截圖,模式: {capture_mode}")
         
         return jsonify({
             'success': True,
@@ -2345,7 +2466,7 @@ def run_flask():
 
 def main():
     """主程式入口"""
-    logger.info("=== AI 自動化開發控制器 Pro v5.3 啟動 ===")
+    logger.info("=== AI 自動化開發控制器 Pro v5.4 啟動 ===")
     logger.info(f"配置目錄: {CONFIG_DIR}")
     logger.info(f"截圖目錄: {SCREENSHOT_DIR}")
     logger.info(f"日誌目錄: {LOG_DIR}")
@@ -2360,7 +2481,7 @@ def main():
     
     global window
     window = webview.create_window(
-        'AI 自動化開發控制器 Pro v5.3',
+        'AI 自動化開發控制器 Pro v5.4',
         f'http://{HOST}:{PORT}',
         width=1400,
         height=1000,
