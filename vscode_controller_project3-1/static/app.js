@@ -13,6 +13,8 @@ let allProjects = [];
 let modelConfig = null;
 let sidebarCollapsed = false;
 let MODEL_LIMITS = {};
+let conversationState = null;
+let activeSessionId = null;
 
 // ============================================
 // Loading Overlay 控制 - 修復版
@@ -231,10 +233,284 @@ function updateProjectPanelVisibility() {
     const hasProject = document.getElementById('projectStructureSection')?.style.display !== 'none';
     const hasAttached = uploadedFiles.length > 0;
     const emptyState = document.getElementById('panelEmptyState');
-    
+
     if (emptyState) {
         emptyState.style.display = (hasProject || hasAttached) ? 'none' : 'block';
     }
+}
+
+// ============================================
+// 對話與記憶輔助函式
+// ============================================
+
+function sanitizeText(text) {
+    if (text === null || text === undefined) return '';
+    return text.toString().replace(/[&<>'"]/g, (char) => {
+        const map = {
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        };
+        return map[char] || char;
+    });
+}
+
+function formatMessageContent(content) {
+    return sanitizeText(content).replace(/\n/g, '<br>');
+}
+
+function formatTerminalContent(content) {
+    return sanitizeText(content).replace(/\n/g, '<br>');
+}
+
+function getAttachmentIcon(name = '', type = '') {
+    const lower = (name || '').toLowerCase();
+    if (type.includes('image')) return '🖼️';
+    if (type.includes('pdf')) return '📕';
+    if (type.includes('json')) return '🧾';
+    if (type.includes('zip')) return '🗜️';
+    if (lower.endsWith('.py')) return '🐍';
+    if (lower.endsWith('.js')) return '🟨';
+    if (lower.endsWith('.ts')) return '🟦';
+    if (lower.endsWith('.html')) return '🌐';
+    if (lower.endsWith('.css')) return '🎨';
+    if (lower.endsWith('.md')) return '📝';
+    if (lower.endsWith('.txt')) return '📄';
+    if (lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return '🖼️';
+    return '📎';
+}
+
+function createAttachmentElement(file) {
+    const attachment = document.createElement('div');
+    attachment.className = 'attachment-chip';
+    attachment.innerHTML = `
+        <span class="attachment-icon">${getAttachmentIcon(file?.name, file?.type)}</span>
+        <span class="attachment-name" title="${sanitizeText(file?.name || '未知檔案')}">${sanitizeText(file?.name || '未知檔案')}</span>
+    `;
+    return attachment;
+}
+
+function buildMessageElement(role, content, usageMetadata = null, terminalOutput = null, files = null, metadata = null, timestamp = null) {
+    const message = document.createElement('div');
+    message.className = `result-message ${role} selectable`;
+
+    const header = document.createElement('div');
+    header.className = 'message-header';
+
+    const avatar = document.createElement('div');
+    avatar.className = `avatar ${role}`;
+    avatar.textContent = role === 'user' ? 'U' : 'AI';
+
+    const roleLabel = document.createElement('span');
+    roleLabel.textContent = role === 'user' ? '您' : 'AI 助手';
+    roleLabel.style.fontWeight = '500';
+
+    header.appendChild(avatar);
+    header.appendChild(roleLabel);
+
+    const displayTime = timestamp || metadata?.created_at || metadata?.timestamp;
+    if (displayTime) {
+        const timeTag = document.createElement('span');
+        timeTag.className = 'message-time';
+        timeTag.textContent = new Date(displayTime).toLocaleString();
+        header.appendChild(timeTag);
+    }
+
+    const messageContent = document.createElement('div');
+    messageContent.className = 'message-content selectable';
+    messageContent.innerHTML = formatMessageContent(content || '');
+
+    message.appendChild(header);
+    message.appendChild(messageContent);
+
+    if (files && files.length > 0) {
+        const attachmentsWrapper = document.createElement('div');
+        attachmentsWrapper.className = 'message-attachments';
+        files.forEach(file => attachmentsWrapper.appendChild(createAttachmentElement(file)));
+        message.appendChild(attachmentsWrapper);
+    }
+
+    if (terminalOutput && terminalOutput.trim()) {
+        const terminalSection = document.createElement('div');
+        terminalSection.className = 'terminal-output-section';
+        terminalSection.innerHTML = `
+            <div class="terminal-header">
+                <span class="terminal-title">Terminal 輸出</span>
+            </div>
+            <div class="terminal-body selectable">${formatTerminalContent(terminalOutput)}</div>
+        `;
+        message.appendChild(terminalSection);
+    }
+
+    if (role === 'assistant' && usageMetadata && typeof usageMetadata === 'object') {
+        const tokenUsage = document.createElement('div');
+        tokenUsage.className = 'token-usage';
+        tokenUsage.innerHTML = `
+            <div class="token-item">
+                <span class="token-label">輸入</span>
+                <span class="token-value">${usageMetadata.prompt_token_count || 0}</span>
+            </div>
+            <div class="token-item">
+                <span class="token-label">輸出</span>
+                <span class="token-value">${usageMetadata.candidates_token_count || 0}</span>
+            </div>
+            <div class="token-item">
+                <span class="token-label">思考</span>
+                <span class="token-value">${usageMetadata.thoughts_token_count || 0}</span>
+            </div>
+            <div class="token-item">
+                <span class="token-label">總計</span>
+                <span class="token-value">${usageMetadata.total_token_count || 0}</span>
+            </div>
+        `;
+        message.appendChild(tokenUsage);
+    }
+
+    return message;
+}
+
+function ensureConversationVisible() {
+    const emptyState = document.getElementById('emptyState');
+    const wrapper = document.getElementById('conversationWrapper');
+    if (emptyState) emptyState.style.display = 'none';
+    if (wrapper) wrapper.style.display = 'block';
+    const resultsContainer = document.getElementById('resultsContainer');
+    if (resultsContainer) resultsContainer.style.display = 'block';
+}
+
+function renderConversation(conversationData) {
+    if (!conversationData) return;
+    ensureConversationVisible();
+    conversationState = conversationData;
+
+    const sessions = conversationData.sessions || [];
+    if (!sessions.length) {
+        const container = document.getElementById('resultsContainer');
+        if (container) container.innerHTML = '';
+        renderSessionTabs([]);
+        renderSessionSummary(null);
+        renderMemoryRecords(conversationData.long_term_memory);
+        return;
+    }
+
+    activeSessionId = conversationData.active_session_id || sessions[sessions.length - 1].session_id;
+    renderSessionTabs(sessions);
+    renderSessionMessages(activeSessionId);
+    const activeSession = sessions.find(session => session.session_id === activeSessionId);
+    renderSessionSummary(activeSession);
+    renderMemoryRecords(conversationData.long_term_memory);
+
+    if (conversationData.session_changed) {
+        showNotification('Token 達到閾值，已開啟新的記憶視窗', 'info');
+    }
+}
+
+function renderSessionTabs(sessions) {
+    const tabsContainer = document.getElementById('sessionTabs');
+    if (!tabsContainer) return;
+    tabsContainer.innerHTML = '';
+
+    sessions.forEach((session, index) => {
+        const tab = document.createElement('button');
+        tab.className = 'session-tab';
+        if (session.session_id === activeSessionId) {
+            tab.classList.add('active');
+        }
+        tab.innerHTML = `
+            <span class="session-title">${sanitizeText(session.title || `視窗 ${index + 1}`)}</span>
+            <span class="session-token">${session.token_count || 0} tokens</span>
+        `;
+        tab.onclick = () => switchConversationSession(session.session_id);
+        tabsContainer.appendChild(tab);
+    });
+}
+
+function renderSessionMessages(sessionId) {
+    const container = document.getElementById('resultsContainer');
+    if (!container) return;
+    container.innerHTML = '';
+
+    if (!conversationState) return;
+    const session = (conversationState.sessions || []).find(item => item.session_id === sessionId);
+    if (!session) return;
+
+    (session.messages || []).forEach(msg => {
+        const element = buildMessageElement(
+            msg.role,
+            msg.content,
+            msg.usage_metadata,
+            msg.terminal_output,
+            msg.files,
+            msg.metadata,
+            msg.timestamp
+        );
+        container.appendChild(element);
+    });
+
+    container.scrollTop = container.scrollHeight;
+}
+
+function renderSessionSummary(session) {
+    const summaryBox = document.getElementById('sessionSummary');
+    if (!summaryBox) return;
+
+    if (!session) {
+        summaryBox.innerHTML = '<div class="session-summary-empty">尚無對話摘要</div>';
+        return;
+    }
+
+    const keywords = (session.keywords || []).map(keyword => `<span class="summary-keyword">${sanitizeText(keyword)}</span>`).join('');
+    const summaryText = formatMessageContent(session.summary || '尚無摘要，持續記錄中...');
+
+    summaryBox.innerHTML = `
+        <div class="summary-title">${sanitizeText(session.title || '目前視窗')}</div>
+        <div class="summary-body">${summaryText}</div>
+        <div class="summary-footer">
+            <span>Token 使用：${session.token_count || 0}</span>
+            <div class="summary-keywords">${keywords}</div>
+        </div>
+    `;
+}
+
+function renderMemoryRecords(memoryData) {
+    const panel = document.getElementById('memoryPanel');
+    const list = document.getElementById('memoryRecordsList');
+    if (!panel || !list) return;
+
+    list.innerHTML = '';
+
+    if (!memoryData || !memoryData.records || memoryData.records.length === 0) {
+        panel.style.display = 'none';
+        return;
+    }
+
+    panel.style.display = 'block';
+    memoryData.records.forEach(record => {
+        const item = document.createElement('div');
+        item.className = 'memory-record';
+        const keywords = (record.keywords || []).map(keyword => `<span class="summary-keyword">${sanitizeText(keyword)}</span>`).join('');
+        item.innerHTML = `
+            <div class="memory-record-header">
+                <span class="memory-record-title">${sanitizeText(record.session_id)}</span>
+                <span class="memory-record-time">${record.updated_at ? new Date(record.updated_at).toLocaleString() : ''}</span>
+            </div>
+            <div class="memory-record-body">${formatMessageContent(record.summary || '')}</div>
+            <div class="memory-record-footer">${keywords}</div>
+        `;
+        list.appendChild(item);
+    });
+}
+
+function switchConversationSession(sessionId) {
+    if (sessionId === activeSessionId) return;
+    activeSessionId = sessionId;
+    if (!conversationState) return;
+    renderSessionTabs(conversationState.sessions || []);
+    renderSessionMessages(sessionId);
+    const activeSession = (conversationState.sessions || []).find(session => session.session_id === sessionId);
+    renderSessionSummary(activeSession);
 }
 
 function togglePlusMenu() {
@@ -327,7 +603,12 @@ async function handleSubmit() {
     document.getElementById('emptyState').style.display = 'none';
     document.getElementById('resultsContainer').style.display = 'block';
 
-    addMessage('user', prompt);
+    const userAttachmentPreview = uploadedFiles.map(file => ({
+        name: file.name,
+        type: file.type || 'text/plain'
+    }));
+    const messageTimestamp = new Date().toISOString();
+    addMessage('user', prompt, null, null, userAttachmentPreview, null, { timestamp: messageTimestamp });
 
     input.value = '';
     updateSubmitButton();
@@ -355,7 +636,11 @@ async function handleSubmit() {
         const result = await response.json();
 
         if (result.success) {
-            addMessage('assistant', result.output, result.usage_metadata, result.terminal_output);
+            if (result.session_context) {
+                renderConversation(result.session_context);
+            } else {
+                addMessage('assistant', result.output, result.usage_metadata, result.terminal_output, null, null, { timestamp: new Date().toISOString() });
+            }
             
             if (result.project) {
                 currentProject = result.project;
@@ -386,85 +671,35 @@ async function handleSubmit() {
             updateFilesPreview();
             updateAttachedFilesDisplay();
         } else {
-            addMessage('assistant', `✕ 執行失敗：${result.error || result.output}`);
+            if (result.session_context) {
+                renderConversation(result.session_context);
+            } else {
+                addMessage('assistant', `✕ 執行失敗：${result.error || result.output}`, null, null, null, null, { timestamp: new Date().toISOString() });
+            }
             showNotification(`執行失敗：${result.error}`, 'error');
         }
     } catch (error) {
-        addMessage('assistant', `✕ 連接錯誤：${error}`);
+        addMessage('assistant', `✕ 連接錯誤：${error}`, null, null, null, null, { timestamp: new Date().toISOString() });
         showNotification(`連接錯誤：${error}`, 'error');
     } finally {
         hideLoading();
     }
 }
 
-function addMessage(role, content, usageMetadata = null, terminalOutput = null) {
+function addMessage(role, content, usageMetadata = null, terminalOutput = null, files = null, metadata = null, options = {}) {
     const container = document.getElementById('resultsContainer');
-    if (!container) return;
-    
-    const message = document.createElement('div');
-    message.className = `result-message ${role} selectable`;
+    if (!container) return null;
 
-    const header = document.createElement('div');
-    header.className = 'message-header';
+    ensureConversationVisible();
 
-    const avatar = document.createElement('div');
-    avatar.className = `avatar ${role}`;
-    avatar.textContent = role === 'user' ? 'U' : 'AI';
+    const messageElement = buildMessageElement(role, content, usageMetadata, terminalOutput, files, metadata, options.timestamp);
+    container.appendChild(messageElement);
 
-    const roleLabel = document.createElement('span');
-    roleLabel.textContent = role === 'user' ? '您' : 'AI 助手';
-    roleLabel.style.fontWeight = '500';
-
-    header.appendChild(avatar);
-    header.appendChild(roleLabel);
-
-    const messageContent = document.createElement('div');
-    messageContent.className = 'message-content selectable';
-    messageContent.textContent = content;
-
-    message.appendChild(header);
-    message.appendChild(messageContent);
-    
-    // ✅ Terminal輸出只顯示在用戶消息中
-    if (role === 'user' && terminalOutput && terminalOutput.trim()) {
-        const terminalSection = document.createElement('div');
-        terminalSection.className = 'terminal-output-section';
-        terminalSection.innerHTML = `
-            <div class="terminal-header">
-                <span class="terminal-title">Terminal 輸出</span>
-            </div>
-            <div class="terminal-body selectable">${terminalOutput}</div>
-        `;
-        message.appendChild(terminalSection);
+    if (options.scroll !== false) {
+        messageElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
-    
-    // Token使用統計只顯示在AI回應中
-    if (role === 'assistant' && usageMetadata && typeof usageMetadata === 'object') {
-        const tokenUsage = document.createElement('div');
-        tokenUsage.className = 'token-usage';
-        tokenUsage.innerHTML = `
-            <div class="token-item">
-                <span class="token-label">輸入</span>
-                <span class="token-value">${usageMetadata.prompt_token_count || 0}</span>
-            </div>
-            <div class="token-item">
-                <span class="token-label">輸出</span>
-                <span class="token-value">${usageMetadata.candidates_token_count || 0}</span>
-            </div>
-            <div class="token-item">
-                <span class="token-label">思考</span>
-                <span class="token-value">${usageMetadata.thoughts_token_count || 0}</span>
-            </div>
-            <div class="token-item">
-                <span class="token-label">總計</span>
-                <span class="token-value">${usageMetadata.total_token_count || 0}</span>
-            </div>
-        `;
-        message.appendChild(tokenUsage);
-    }
-    
-    container.appendChild(message);
-    message.scrollIntoView({ behavior: 'smooth' });
+
+    return messageElement;
 }
 
 function useSuggestion(text) {
@@ -490,7 +725,7 @@ async function createNewProject() {
         if (result.success && result.path) {
             currentProjectDir = result.path;
             isIterationMode = false;
-            
+
             document.getElementById('currentProjectDisplay').style.display = 'block';
             document.getElementById('currentProjectName').textContent = '新專案';
             const badge = document.getElementById('projectModeBadge');
@@ -498,22 +733,35 @@ async function createNewProject() {
                 badge.textContent = '新建';
                 badge.style.background = '#10a37f';
             }
-            
+
             document.getElementById('homeBtn').style.display = 'flex';
-            
+
             document.querySelectorAll('.project-item').forEach(item => {
                 item.classList.remove('active');
             });
-            
+
             uploadedFiles = [];
+            conversationState = null;
+            activeSessionId = null;
             updateFilesPreview();
             updateAttachedFilesDisplay();
-            
+
             document.getElementById('projectStructureSection').style.display = 'none';
             document.getElementById('emptyState').style.display = 'none';
-            document.getElementById('resultsContainer').style.display = 'block';
-            document.getElementById('resultsContainer').innerHTML = '';
-            
+            const wrapper = document.getElementById('conversationWrapper');
+            const resultsContainer = document.getElementById('resultsContainer');
+            if (wrapper) wrapper.style.display = 'block';
+            if (resultsContainer) {
+                resultsContainer.style.display = 'block';
+                resultsContainer.innerHTML = '';
+            }
+            const summary = document.getElementById('sessionSummary');
+            if (summary) summary.innerHTML = '<div class="session-summary-empty">尚無對話摘要</div>';
+            const tabs = document.getElementById('sessionTabs');
+            if (tabs) tabs.innerHTML = '';
+            const memoryPanel = document.getElementById('memoryPanel');
+            if (memoryPanel) memoryPanel.style.display = 'none';
+
             showNotification('已選擇專案資料夾', 'success');
             document.getElementById('mainInput')?.focus();
         } else {
@@ -673,13 +921,22 @@ async function selectProject(project) {
     document.getElementById('emptyState').style.display = 'none';
     document.getElementById('resultsContainer').style.display = 'block';
     document.getElementById('resultsContainer').innerHTML = '';
-    
+
     uploadedFiles = [];
     updateFilesPreview();
     updateAttachedFilesDisplay();
-    
+
+    conversationState = null;
+    activeSessionId = null;
+    const tabs = document.getElementById('sessionTabs');
+    if (tabs) tabs.innerHTML = '';
+    const summary = document.getElementById('sessionSummary');
+    if (summary) summary.innerHTML = '<div class="session-summary-empty">尚無對話摘要</div>';
+    const memoryPanel = document.getElementById('memoryPanel');
+    if (memoryPanel) memoryPanel.style.display = 'none';
+
     await loadExistingProject(project.path);
-    
+
     showNotification(`已切換到專案: ${project.name}`, 'success');
 }
 
@@ -711,17 +968,10 @@ async function loadExistingProject(projectDir) {
             document.getElementById('currentProjectName').textContent = currentProject.name;
             displayProjectStructure(result.project_info.files);
             
-            if (result.conversation && result.conversation.messages) {
-                const container = document.getElementById('resultsContainer');
-                if (container) {
-                    container.innerHTML = '';
-                    
-                    for (const msg of result.conversation.messages) {
-                        addMessage(msg.role, msg.content, msg.usage_metadata, msg.terminal_output);
-                    }
-                }
+            if (result.conversation) {
+                renderConversation(result.conversation);
             }
-            
+
             return true;
         } else {
             return false;
@@ -824,11 +1074,21 @@ function resetToHome() {
     currentProject = null;
     isIterationMode = false;
     uploadedFiles = [];
-    
+    conversationState = null;
+    activeSessionId = null;
+
     document.getElementById('currentProjectDisplay').style.display = 'none';
     document.getElementById('emptyState').style.display = 'flex';
     document.getElementById('resultsContainer').style.display = 'none';
     document.getElementById('resultsContainer').innerHTML = '';
+    const wrapper = document.getElementById('conversationWrapper');
+    if (wrapper) wrapper.style.display = 'none';
+    const memoryPanel = document.getElementById('memoryPanel');
+    if (memoryPanel) memoryPanel.style.display = 'none';
+    const tabs = document.getElementById('sessionTabs');
+    if (tabs) tabs.innerHTML = '';
+    const summary = document.getElementById('sessionSummary');
+    if (summary) summary.innerHTML = '<div class="session-summary-empty">尚無對話摘要</div>';
     document.getElementById('projectStructureSection').style.display = 'none';
     document.getElementById('homeBtn').style.display = 'none';
     

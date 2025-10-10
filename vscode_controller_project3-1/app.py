@@ -17,6 +17,8 @@ import json
 import platform
 import logging
 import queue
+import uuid
+from collections import Counter
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
 from pathlib import Path
@@ -187,6 +189,20 @@ class ConversationMessage:
     usage_metadata: Optional[Dict] = None  # ⭐ 新增：直接保存 token 統計
 
 @dataclass
+@dataclass
+class ConversationSession:
+    """單一對話視窗(短期記憶)"""
+    session_id: str
+    title: str
+    created_at: str
+    updated_at: str
+    messages: List[ConversationMessage] = field(default_factory=list)
+    token_count: int = 0
+    summary: Optional[str] = None
+    keywords: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
 class ProjectConversation:
     """專案對話歷史"""
     project_dir: str
@@ -194,6 +210,28 @@ class ProjectConversation:
     messages: List[ConversationMessage] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+    sessions: List[ConversationSession] = field(default_factory=list)
+    active_session_id: Optional[str] = None
+
+@dataclass
+class LongTermMemoryRecord:
+    """長期記憶紀錄"""
+    session_id: str
+    summary: str
+    keywords: List[str] = field(default_factory=list)
+    important_actions: List[str] = field(default_factory=list)
+    related_files: List[str] = field(default_factory=list)
+    token_count: int = 0
+    created_at: str = ""
+    updated_at: str = ""
+
+@dataclass
+class LongTermMemory:
+    """長期記憶資料結構"""
+    project_dir: str
+    project_name: str
+    records: List[LongTermMemoryRecord] = field(default_factory=list)
+    schema_version: str = "1.0"
 
 @dataclass
 class ProcessResult:
@@ -211,6 +249,7 @@ class ProcessResult:
     is_iteration: bool = False
     usage_metadata: Optional[Dict] = None
     terminal_output: str = ""
+    session_context: Optional[Dict[str, Any]] = None
 
 # ============================================
 # JSON Schema 定義 - 繁體中文化
@@ -415,8 +454,166 @@ class ConfigManager:
 # 對話歷史管理 - 修復版
 # ============================================
 
+class MemorySummarizer:
+    """簡易摘要與關鍵字分析工具"""
+
+    @staticmethod
+    def estimate_tokens(text: str) -> int:
+        if not text:
+            return 0
+        # 以平均 4 個字元 ≈ 1 個 token 的粗略估算
+        return max(1, int(len(text) / 4))
+
+    @staticmethod
+    def summarize_messages(messages: List[ConversationMessage], max_items: int = 6) -> str:
+        if not messages:
+            return ""
+
+        selected = messages[-max_items:]
+        parts = []
+        for msg in selected:
+            role_label = "使用者" if msg.role == 'user' else "AI"
+            snippet = re.sub(r"\s+", " ", msg.content.strip())
+            if len(snippet) > 160:
+                snippet = snippet[:160] + "..."
+            parts.append(f"{role_label}: {snippet}")
+        return "\n".join(parts)
+
+    @staticmethod
+    def extract_keywords(messages: List[ConversationMessage], top_k: int = 6) -> List[str]:
+        if not messages:
+            return []
+
+        text = " ".join(msg.content for msg in messages if msg.content)
+        tokens = re.findall(r"[A-Za-z0-9\u4e00-\u9fff]{2,}", text)
+        filtered = [t.lower() for t in tokens if len(t) > 1]
+        if not filtered:
+            return []
+
+        counts = Counter(filtered)
+        most_common = [word for word, _ in counts.most_common(top_k)]
+        return most_common
+
+
+class LongTermMemoryManager:
+    """長期記憶管理器"""
+
+    @staticmethod
+    def get_memory_file(project_dir: str) -> Path:
+        import hashlib
+        project_hash = hashlib.md5(project_dir.encode()).hexdigest()
+        return CONVERSATIONS_DIR / f"memory_{project_hash}.json"
+
+    @staticmethod
+    def load_memory(project_dir: str, project_name: str = "") -> LongTermMemory:
+        memory_file = LongTermMemoryManager.get_memory_file(project_dir)
+        if not memory_file.exists():
+            return LongTermMemory(
+                project_dir=project_dir,
+                project_name=project_name or Path(project_dir).name,
+                records=[],
+                schema_version="1.0"
+            )
+
+        try:
+            with open(memory_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                records = []
+                for item in data.get('records', []):
+                    records.append(LongTermMemoryRecord(
+                        session_id=item.get('session_id', ''),
+                        summary=item.get('summary', ''),
+                        keywords=item.get('keywords', []),
+                        important_actions=item.get('important_actions', []),
+                        related_files=item.get('related_files', []),
+                        token_count=item.get('token_count', 0),
+                        created_at=item.get('created_at', ''),
+                        updated_at=item.get('updated_at', '')
+                    ))
+
+                return LongTermMemory(
+                    project_dir=data.get('project_dir', project_dir),
+                    project_name=data.get('project_name', project_name or Path(project_dir).name),
+                    records=records,
+                    schema_version=data.get('schema_version', '1.0')
+                )
+        except Exception as e:
+            logger.error(f"載入長期記憶失敗: {e}")
+            return LongTermMemory(
+                project_dir=project_dir,
+                project_name=project_name or Path(project_dir).name
+            )
+
+    @staticmethod
+    def save_memory(memory: LongTermMemory) -> None:
+        memory_file = LongTermMemoryManager.get_memory_file(memory.project_dir)
+        data = {
+            'project_dir': memory.project_dir,
+            'project_name': memory.project_name,
+            'schema_version': memory.schema_version,
+            'records': [
+                {
+                    'session_id': record.session_id,
+                    'summary': record.summary,
+                    'keywords': record.keywords,
+                    'important_actions': record.important_actions,
+                    'related_files': record.related_files,
+                    'token_count': record.token_count,
+                    'created_at': record.created_at,
+                    'updated_at': record.updated_at
+                }
+                for record in memory.records
+            ]
+        }
+
+        with open(memory_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+    @staticmethod
+    def upsert_record(project_dir: str, project_name: str, session: ConversationSession) -> LongTermMemoryRecord:
+        memory = LongTermMemoryManager.load_memory(project_dir, project_name)
+        now = datetime.now().isoformat()
+        existing = next((r for r in memory.records if r.session_id == session.session_id), None)
+
+        summary = session.summary or MemorySummarizer.summarize_messages(session.messages)
+        keywords = session.keywords or MemorySummarizer.extract_keywords(session.messages)
+
+        if existing:
+            existing.summary = summary
+            existing.keywords = keywords
+            existing.token_count = session.token_count
+            existing.updated_at = now
+        else:
+            existing = LongTermMemoryRecord(
+                session_id=session.session_id,
+                summary=summary,
+                keywords=keywords,
+                token_count=session.token_count,
+                created_at=session.created_at,
+                updated_at=now
+            )
+            memory.records.append(existing)
+
+        LongTermMemoryManager.save_memory(memory)
+        return existing
+
+    @staticmethod
+    def delete_memory(project_dir: str) -> bool:
+        memory_file = LongTermMemoryManager.get_memory_file(project_dir)
+        if memory_file.exists():
+            try:
+                memory_file.unlink()
+                return True
+            except Exception as e:
+                logger.error(f"刪除長期記憶失敗: {e}")
+        return False
+
+
 class ConversationManager:
-    """對話歷史管理器 - 修復 token 統計保存問題"""
+    """對話歷史管理器 - 修復 token 統計保存問題 + 長短期記憶"""
+
+    TOKEN_THRESHOLD = 6000
+    SUMMARY_THRESHOLD = 4000
     
     @staticmethod
     def get_conversation_file(project_dir: str) -> Path:
@@ -427,88 +624,193 @@ class ConversationManager:
     
     @staticmethod
     def load_conversation(project_dir: str) -> ProjectConversation:
-        """載入專案對話歷史 - 正確處理 usage_metadata"""
+        """載入專案對話歷史 - 支援多視窗與 usage_metadata"""
         conv_file = ConversationManager.get_conversation_file(project_dir)
-        
+
         if not conv_file.exists():
             project_name = Path(project_dir).name
+            session_id = ConversationManager._generate_session_id()
+            session = ConversationSession(
+                session_id=session_id,
+                title="視窗 1",
+                created_at=datetime.now().isoformat(),
+                updated_at=datetime.now().isoformat()
+            )
             conv = ProjectConversation(
                 project_dir=project_dir,
                 project_name=project_name,
                 created_at=datetime.now().isoformat(),
-                updated_at=datetime.now().isoformat()
+                updated_at=datetime.now().isoformat(),
+                sessions=[session],
+                active_session_id=session_id
             )
             return conv
-        
+
         try:
             with open(conv_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                messages = []
+                base_messages = []
                 for msg_data in data.get('messages', []):
-                    # ⭐ 關鍵修復：正確處理 usage_metadata
                     usage_metadata = msg_data.get('usage_metadata')
                     if not usage_metadata and msg_data.get('metadata'):
-                        # 向後兼容：從 metadata 中提取 usage_metadata
                         usage_metadata = msg_data['metadata'].get('usage_metadata')
-                    
-                    messages.append(ConversationMessage(
+
+                    base_messages.append(ConversationMessage(
                         role=msg_data['role'],
                         content=msg_data['content'],
                         timestamp=msg_data['timestamp'],
                         files=msg_data.get('files'),
                         metadata=msg_data.get('metadata'),
                         terminal_output=msg_data.get('terminal_output'),
-                        usage_metadata=usage_metadata  # ⭐ 直接保存
+                        usage_metadata=usage_metadata
                     ))
-                
-                return ProjectConversation(
-                    project_dir=data['project_dir'],
-                    project_name=data['project_name'],
-                    messages=messages,
-                    created_at=data.get('created_at', ''),
-                    updated_at=data.get('updated_at', '')
+
+                sessions = []
+                sessions_data = data.get('sessions', [])
+                if sessions_data:
+                    for idx, session_data in enumerate(sessions_data, start=1):
+                        session_messages = []
+                        for msg_data in session_data.get('messages', []):
+                            usage_metadata = msg_data.get('usage_metadata')
+                            if not usage_metadata and msg_data.get('metadata'):
+                                usage_metadata = msg_data['metadata'].get('usage_metadata')
+
+                            session_messages.append(ConversationMessage(
+                                role=msg_data['role'],
+                                content=msg_data['content'],
+                                timestamp=msg_data['timestamp'],
+                                files=msg_data.get('files'),
+                                metadata=msg_data.get('metadata'),
+                                terminal_output=msg_data.get('terminal_output'),
+                                usage_metadata=usage_metadata
+                            ))
+
+                        token_count = session_data.get('token_count')
+                        if token_count is None:
+                            token_count = ConversationManager._count_tokens(session_messages)
+
+                        sessions.append(ConversationSession(
+                            session_id=session_data.get('session_id', ConversationManager._generate_session_id()),
+                            title=session_data.get('title', f"視窗 {idx}"),
+                            created_at=session_data.get('created_at', data.get('created_at', datetime.now().isoformat())),
+                            updated_at=session_data.get('updated_at', data.get('updated_at', datetime.now().isoformat())),
+                            messages=session_messages,
+                            token_count=token_count,
+                            summary=session_data.get('summary'),
+                            keywords=session_data.get('keywords', []),
+                            metadata=session_data.get('metadata', {})
+                        ))
+                else:
+                    session_id = ConversationManager._generate_session_id()
+                    sessions.append(ConversationSession(
+                        session_id=session_id,
+                        title="視窗 1",
+                        created_at=data.get('created_at', datetime.now().isoformat()),
+                        updated_at=data.get('updated_at', datetime.now().isoformat()),
+                        messages=base_messages.copy(),
+                        token_count=ConversationManager._count_tokens(base_messages)
+                    ))
+
+                active_session_id = data.get('active_session_id')
+                if not active_session_id and sessions:
+                    active_session_id = sessions[-1].session_id
+
+                conversation = ProjectConversation(
+                    project_dir=data.get('project_dir', project_dir),
+                    project_name=data.get('project_name', Path(project_dir).name),
+                    messages=base_messages,
+                    created_at=data.get('created_at', datetime.now().isoformat()),
+                    updated_at=data.get('updated_at', datetime.now().isoformat()),
+                    sessions=sessions,
+                    active_session_id=active_session_id
                 )
+
+                active_session = ConversationManager._get_active_session(conversation)
+                if active_session:
+                    conversation.messages = active_session.messages
+
+                return conversation
         except Exception as e:
             logger.error(f"載入對話歷史失敗: {e}")
+            session_id = ConversationManager._generate_session_id()
             return ProjectConversation(
                 project_dir=project_dir,
                 project_name=Path(project_dir).name,
                 created_at=datetime.now().isoformat(),
-                updated_at=datetime.now().isoformat()
+                updated_at=datetime.now().isoformat(),
+                sessions=[ConversationSession(
+                    session_id=session_id,
+                    title="視窗 1",
+                    created_at=datetime.now().isoformat(),
+                    updated_at=datetime.now().isoformat()
+                )],
+                active_session_id=session_id
             )
-    
+
     @staticmethod
     def save_conversation(conversation: ProjectConversation) -> bool:
-        """儲存對話歷史 - 正確序列化 usage_metadata"""
+        """儲存對話歷史 - 正確序列化 usage_metadata 與視窗結構"""
         try:
             conv_file = ConversationManager.get_conversation_file(conversation.project_dir)
             conversation.updated_at = datetime.now().isoformat()
-            
-            # ⭐ 關鍵修復：使用自定義序列化保留 usage_metadata
-            messages_data = []
-            for msg in conversation.messages:
-                msg_dict = {
+
+            active_session = ConversationManager._get_active_session(conversation)
+            if active_session:
+                conversation.messages = active_session.messages
+
+            messages_data = [
+                {
                     'role': msg.role,
                     'content': msg.content,
                     'timestamp': msg.timestamp,
                     'files': msg.files,
                     'metadata': msg.metadata,
                     'terminal_output': msg.terminal_output,
-                    'usage_metadata': msg.usage_metadata  # ⭐ 直接保存
+                    'usage_metadata': msg.usage_metadata
                 }
-                messages_data.append(msg_dict)
-            
+                for msg in conversation.messages
+            ]
+
+            sessions_data = []
+            for session in conversation.sessions:
+                session_messages = [
+                    {
+                        'role': msg.role,
+                        'content': msg.content,
+                        'timestamp': msg.timestamp,
+                        'files': msg.files,
+                        'metadata': msg.metadata,
+                        'terminal_output': msg.terminal_output,
+                        'usage_metadata': msg.usage_metadata
+                    }
+                    for msg in session.messages
+                ]
+
+                sessions_data.append({
+                    'session_id': session.session_id,
+                    'title': session.title,
+                    'created_at': session.created_at,
+                    'updated_at': session.updated_at,
+                    'token_count': session.token_count,
+                    'summary': session.summary,
+                    'keywords': session.keywords,
+                    'metadata': session.metadata,
+                    'messages': session_messages
+                })
+
             data = {
                 'project_dir': conversation.project_dir,
                 'project_name': conversation.project_name,
                 'messages': messages_data,
                 'created_at': conversation.created_at,
-                'updated_at': conversation.updated_at
+                'updated_at': conversation.updated_at,
+                'sessions': sessions_data,
+                'active_session_id': conversation.active_session_id
             }
-            
+
             with open(conv_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-            
+
             logger.info(f"對話歷史已儲存: {conversation.project_name}")
             return True
         except Exception as e:
@@ -516,12 +818,15 @@ class ConversationManager:
             return False
     
     @staticmethod
-    def add_message(project_dir: str, role: str, content: str, files: Optional[List[Dict]] = None, 
+    def add_message(project_dir: str, role: str, content: str, files: Optional[List[Dict]] = None,
                    metadata: Optional[Dict] = None, terminal_output: Optional[str] = None,
-                   usage_metadata: Optional[Dict] = None):  # ⭐ 新增參數
-        """添加消息到對話歷史 - 支持 usage_metadata"""
+                   usage_metadata: Optional[Dict] = None) -> Dict[str, Any]:
+        """添加消息到對話歷史 - 支持 usage_metadata 與視窗切換"""
         conversation = ConversationManager.load_conversation(project_dir)
-        
+
+        message_tokens = MemorySummarizer.estimate_tokens(content)
+        session, session_changed = ConversationManager._ensure_active_session(conversation, message_tokens)
+
         message = ConversationMessage(
             role=role,
             content=content,
@@ -529,12 +834,27 @@ class ConversationManager:
             files=files,
             metadata=metadata,
             terminal_output=terminal_output,
-            usage_metadata=usage_metadata  # ⭐ 直接保存
+            usage_metadata=usage_metadata
         )
-        
-        conversation.messages.append(message)
+
+        session.messages.append(message)
+        session.token_count += message_tokens
+        session.updated_at = message.timestamp
+
+        if role == 'assistant':
+            session.summary = MemorySummarizer.summarize_messages(session.messages)
+            session.keywords = MemorySummarizer.extract_keywords(session.messages)
+
+        conversation.active_session_id = session.session_id
+        conversation.messages = session.messages
+
         ConversationManager.save_conversation(conversation)
-    
+
+        serialized = ConversationManager.serialize_conversation(conversation)
+        serialized['session_changed'] = session_changed
+        serialized['last_message_role'] = role
+        return serialized
+
     @staticmethod
     def delete_conversation_file(project_dir: str) -> bool:
         """刪除對話檔案 - 用於清理臨時對話"""
@@ -543,11 +863,132 @@ class ConversationManager:
             if conv_file.exists():
                 conv_file.unlink()
                 logger.info(f"已刪除對話檔案: {conv_file}")
-                return True
-            return False
+            LongTermMemoryManager.delete_memory(project_dir)
+            return True
         except Exception as e:
             logger.error(f"刪除對話檔案失敗: {e}")
             return False
+
+    @staticmethod
+    def serialize_conversation(conversation: ProjectConversation) -> Dict[str, Any]:
+        memory = LongTermMemoryManager.load_memory(conversation.project_dir, conversation.project_name)
+
+        sessions_payload = []
+        for session in conversation.sessions:
+            messages_payload = [
+                {
+                    'role': msg.role,
+                    'content': msg.content,
+                    'timestamp': msg.timestamp,
+                    'files': msg.files,
+                    'metadata': msg.metadata,
+                    'terminal_output': msg.terminal_output,
+                    'usage_metadata': msg.usage_metadata
+                }
+                for msg in session.messages
+            ]
+
+            summary = session.summary or MemorySummarizer.summarize_messages(session.messages)
+            keywords = session.keywords or MemorySummarizer.extract_keywords(session.messages)
+
+            sessions_payload.append({
+                'session_id': session.session_id,
+                'title': session.title,
+                'created_at': session.created_at,
+                'updated_at': session.updated_at,
+                'token_count': session.token_count,
+                'summary': summary,
+                'keywords': keywords,
+                'metadata': session.metadata,
+                'messages': messages_payload
+            })
+
+        memory_payload = {
+            'project_dir': memory.project_dir,
+            'project_name': memory.project_name,
+            'schema_version': memory.schema_version,
+            'records': [
+                {
+                    'session_id': record.session_id,
+                    'summary': record.summary,
+                    'keywords': record.keywords,
+                    'important_actions': record.important_actions,
+                    'related_files': record.related_files,
+                    'token_count': record.token_count,
+                    'created_at': record.created_at,
+                    'updated_at': record.updated_at
+                }
+                for record in memory.records
+            ]
+        }
+
+        return {
+            'project_dir': conversation.project_dir,
+            'project_name': conversation.project_name,
+            'created_at': conversation.created_at,
+            'updated_at': conversation.updated_at,
+            'sessions': sessions_payload,
+            'active_session_id': conversation.active_session_id,
+            'long_term_memory': memory_payload
+        }
+
+    @staticmethod
+    def _generate_session_id() -> str:
+        return str(uuid.uuid4())
+
+    @staticmethod
+    def _count_tokens(messages: List[ConversationMessage]) -> int:
+        return sum(MemorySummarizer.estimate_tokens(msg.content) for msg in messages)
+
+    @staticmethod
+    def _get_active_session(conversation: ProjectConversation) -> Optional[ConversationSession]:
+        if not conversation.sessions:
+            return None
+        session_map = {session.session_id: session for session in conversation.sessions}
+        if conversation.active_session_id in session_map:
+            return session_map[conversation.active_session_id]
+        return conversation.sessions[-1]
+
+    @staticmethod
+    def _ensure_active_session(conversation: ProjectConversation, incoming_tokens: int) -> Tuple[ConversationSession, bool]:
+        session = ConversationManager._get_active_session(conversation)
+        session_changed = False
+
+        if not session:
+            session = ConversationManager._start_new_session(conversation)
+            session_changed = True
+        else:
+            projected_tokens = session.token_count + incoming_tokens
+            if projected_tokens > ConversationManager.TOKEN_THRESHOLD:
+                ConversationManager._finalize_session(conversation, session)
+                session = ConversationManager._start_new_session(conversation)
+                session_changed = True
+        return session, session_changed
+
+    @staticmethod
+    def _start_new_session(conversation: ProjectConversation) -> ConversationSession:
+        index = len(conversation.sessions) + 1
+        session_id = ConversationManager._generate_session_id()
+        session = ConversationSession(
+            session_id=session_id,
+            title=f"視窗 {index}",
+            created_at=datetime.now().isoformat(),
+            updated_at=datetime.now().isoformat(),
+            messages=[],
+            token_count=0,
+            metadata={'index': index}
+        )
+        conversation.sessions.append(session)
+        conversation.active_session_id = session_id
+        return session
+
+    @staticmethod
+    def _finalize_session(conversation: ProjectConversation, session: ConversationSession) -> None:
+        session.summary = MemorySummarizer.summarize_messages(session.messages)
+        session.keywords = MemorySummarizer.extract_keywords(session.messages)
+        session.metadata['finalized_at'] = datetime.now().isoformat()
+        LongTermMemoryManager.upsert_record(conversation.project_dir, conversation.project_name, session)
+
 
 # ============================================
 # 專案管理模塊
@@ -1663,9 +2104,10 @@ class ProcessManager:
         attach_terminal: bool = False
     ) -> ProcessResult:
         """執行完整的自動化流程 - 修復版"""
-        
+
         result = ProcessResult(success=False, is_iteration=is_iteration)
-        
+        session_changed_flag = False
+
         try:
             if is_iteration:
                 logger.info("迭代模式:自動載入專案所有檔案")
@@ -1685,13 +2127,15 @@ class ProcessManager:
                     result.terminal_output = terminal_output
             
             # ⭐ 修復:在正確的時機保存用戶消息
-            ConversationManager.add_message(
+            result.session_context = ConversationManager.add_message(
                 folder_path,
                 'user',
                 prompt,
                 files=[{'name': f.get('name'), 'type': f.get('type')} for f in (files or [])],
                 terminal_output=terminal_output
             )
+            if result.session_context:
+                session_changed_flag = result.session_context.get('session_changed', False)
             
             if is_iteration and attach_screenshot:
                 project_info = ProjectManager.load_project_info(folder_path)
@@ -1820,13 +2264,18 @@ class ProcessManager:
                     result.output += "\n=== 🔍 檢測到程式碼區塊 ===\n您可以手動複製下方 AI 回應中的程式碼。"
                 
                 # ⭐ 修復:使用正確的路徑保存錯誤消息
-                ConversationManager.add_message(
+                result.session_context = ConversationManager.add_message(
                     folder_path,
                     'assistant',
                     result.output,
                     metadata={'error': True, 'error_type': 'parse_error'}
                 )
-                
+                if result.session_context:
+                    session_changed_flag = session_changed_flag or result.session_context.get('session_changed', False)
+
+                if result.session_context and session_changed_flag:
+                    result.session_context['session_changed'] = result.session_context.get('session_changed', False) or session_changed_flag
+
                 return result
             
             if is_iteration:
@@ -1868,7 +2317,17 @@ class ProcessManager:
                     # 保存到新路徑
                     ConversationManager.save_conversation(temp_conversation)
                     logger.info(f"已遷移 {len(temp_conversation.messages)} 條對話記錄")
-                    
+
+                    try:
+                        memory = LongTermMemoryManager.load_memory(folder_path, project.project_name)
+                        if memory.records:
+                            memory.project_dir = final_project_dir
+                            memory.project_name = project.project_name
+                            LongTermMemoryManager.save_memory(memory)
+                        LongTermMemoryManager.delete_memory(folder_path)
+                    except Exception as memory_error:
+                        logger.warning(f"長期記憶遷移失敗: {memory_error}")
+
                     # ⭐ 清理臨時對話檔案
                     try:
                         ConversationManager.delete_conversation_file(folder_path)
@@ -2049,7 +2508,7 @@ class ProcessManager:
             result.success = True
             
             # ⭐ 關鍵修復:使用最終路徑和正確的 usage_metadata 保存AI回應
-            ConversationManager.add_message(
+            result.session_context = ConversationManager.add_message(
                 final_project_dir,  # ✅ 使用最終專案路徑
                 'assistant',
                 result.output,
@@ -2060,24 +2519,31 @@ class ProcessManager:
                 terminal_output=result.terminal_output,
                 usage_metadata=usage_metadata  # ⭐ 直接傳遞 usage_metadata
             )
-            
+            if result.session_context:
+                session_changed_flag = session_changed_flag or result.session_context.get('session_changed', False)
+
         except Exception as e:
             result.error = str(e)
             logger.error(f"處理流程失敗: {e}")
             import traceback
             logger.error(traceback.format_exc())
-            
+
             if not result.ai_response:
                 result.ai_response = "無法獲取 AI 回應"
-            
+
             # 錯誤情況下也保存消息
-            ConversationManager.add_message(
+            result.session_context = ConversationManager.add_message(
                 folder_path,
                 'assistant',
                 f"執行失敗: {result.error}",
                 metadata={'error': True, 'error_type': 'execution_error'}
             )
-        
+            if result.session_context:
+                session_changed_flag = session_changed_flag or result.session_context.get('session_changed', False)
+
+        if result.session_context and session_changed_flag:
+            result.session_context['session_changed'] = result.session_context.get('session_changed', False) or session_changed_flag
+
         return result
 
 # ============================================
@@ -2165,32 +2631,15 @@ def load_project():
         project_files = ProjectManager.load_project_files(project_dir)
         project_structure = ProjectManager.get_project_structure(project_dir)
         conversation = ConversationManager.load_conversation(project_dir)
-        
-        # ⭐ 修復:正確序列化對話消息,保留 usage_metadata
-        messages_data = []
-        for msg in conversation.messages:
-            msg_dict = {
-                'role': msg.role,
-                'content': msg.content,
-                'timestamp': msg.timestamp,
-                'files': msg.files,
-                'metadata': msg.metadata,
-                'terminal_output': msg.terminal_output,
-                'usage_metadata': msg.usage_metadata  # ⭐ 直接傳遞
-            }
-            messages_data.append(msg_dict)
-        
+        serialized_conversation = ConversationManager.serialize_conversation(conversation)
+
         return jsonify({
             'success': True,
             'project_info': project_info,
             'project_files': project_files,
             'project_structure': project_structure,
             'files_count': len(project_files),
-            'conversation': {
-                'messages': messages_data,
-                'created_at': conversation.created_at,
-                'updated_at': conversation.updated_at
-            }
+            'conversation': serialized_conversation
         })
         
     except Exception as e:
@@ -2208,29 +2657,11 @@ def get_conversation(project_dir):
     """獲取專案對話歷史"""
     try:
         conversation = ConversationManager.load_conversation(project_dir)
-        
-        # ⭐ 修復:正確序列化,保留 usage_metadata
-        messages_data = []
-        for msg in conversation.messages:
-            msg_dict = {
-                'role': msg.role,
-                'content': msg.content,
-                'timestamp': msg.timestamp,
-                'files': msg.files,
-                'metadata': msg.metadata,
-                'terminal_output': msg.terminal_output,
-                'usage_metadata': msg.usage_metadata
-            }
-            messages_data.append(msg_dict)
-        
+        serialized = ConversationManager.serialize_conversation(conversation)
+
         return jsonify({
             'success': True,
-            'conversation': {
-                'project_name': conversation.project_name,
-                'messages': messages_data,
-                'created_at': conversation.created_at,
-                'updated_at': conversation.updated_at
-            }
+            'conversation': serialized
         })
     except Exception as e:
         logger.error(f"獲取對話歷史失敗: {e}")
@@ -2324,7 +2755,8 @@ def run_process():
             'screenshots': result.screenshots,
             'is_iteration': result.is_iteration,
             'usage_metadata': result.usage_metadata,
-            'terminal_output': result.terminal_output
+            'terminal_output': result.terminal_output,
+            'session_context': result.session_context
         }
         
         if result.project_data:
