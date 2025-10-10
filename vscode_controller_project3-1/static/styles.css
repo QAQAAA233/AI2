@@ -835,8 +835,21 @@ body {
 .message-header {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 10px;
     margin-bottom: 10px;
+}
+
+.message-header-main {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.message-timestamp {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    white-space: nowrap;
 }
 
 .avatar {
@@ -925,6 +938,306 @@ body {
     line-height: 1.4;
     white-space: pre-wrap;
     word-wrap: break-word;
+}
+
+/* =================================== */
+/* 附件區塊 */
+/* =================================== */
+.attachment-section {
+    margin-top: 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border-light);
+    background: var(--bg-primary);
+    padding: 10px 12px;
+}
+
+.attachment-title {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.attachment-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.attachment-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-light);
+    font-size: 12px;
+    color: var(--text-primary);
+}
+
+.attachment-icon {
+    font-size: 14px;
+}
+
+.attachment-name {
+    font-weight: 500;
+}
+
+.attachment-size {
+    font-size: 11px;
+    color: var(--text-tertiary);
+}
+
+/* =================================== */
+/* 長短期記憶面板 */
+/* =================================== */
+.memory-panel {
+    max-width: 900px;
+    margin: 0 auto 20px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-light);
+    border-radius: 14px;
+    padding: 16px 20px;
+    display: none;
+    box-shadow: var(--shadow-sm);
+}
+
+.memory-panel.memory-alert {
+    border-color: #f97316;
+    box-shadow: 0 6px 20px rgba(249, 115, 22, 0.15);
+}
+
+.memory-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 16px;
+}
+
+.memory-header h3 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+}
+
+.memory-subtitle,
+#memoryStats {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.memory-body {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+
+.memory-column h4 {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+    font-weight: 600;
+}
+
+.memory-list {
+    background: var(--bg-primary);
+    border: 1px dashed var(--border-light);
+    border-radius: 10px;
+    padding: 12px;
+    min-height: 140px;
+    max-height: 260px;
+    overflow-y: auto;
+}
+
+.memory-list.empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    color: var(--text-tertiary);
+    font-style: italic;
+}
+
+.memory-item {
+    border-bottom: 1px solid var(--border-light);
+    padding-bottom: 10px;
+    margin-bottom: 10px;
+}
+
+.memory-item:last-child {
+    border-bottom: none;
+    margin-bottom: 0;
+    padding-bottom: 0;
+}
+
+.memory-item-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+}
+
+.memory-item-body {
+    font-size: 13px;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    line-height: 1.5;
+}
+
+.memory-item-footer {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+}
+
+.memory-keywords {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.memory-keyword {
+    background: var(--bg-secondary);
+    border-radius: 12px;
+    padding: 3px 8px;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.short-term-item {
+    background: var(--bg-secondary);
+    border-radius: 10px;
+    border: 1px solid var(--border-light);
+    padding: 10px;
+    margin-bottom: 10px;
+}
+
+.short-term-item:last-child {
+    margin-bottom: 0;
+}
+
+.short-term-item-role {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 4px;
+}
+
+.short-term-item-content {
+    font-size: 13px;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    line-height: 1.5;
+}
+
+.short-term-item-time {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: 6px;
+}
+
+.short-term-item-tokens {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 2px;
+}
+
+/* =================================== */
+/* 長期記憶視窗 */
+/* =================================== */
+.memory-window {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(15, 23, 42, 0.45);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 20000;
+    padding: 24px;
+}
+
+.memory-window.active {
+    display: flex;
+}
+
+.memory-window-content {
+    background: var(--bg-primary);
+    border-radius: 16px;
+    max-width: 520px;
+    width: 100%;
+    border: 1px solid var(--border-light);
+    box-shadow: var(--shadow-lg);
+    overflow: hidden;
+}
+
+.memory-window-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-light);
+    font-weight: 600;
+    font-size: 15px;
+}
+
+.close-memory-window {
+    background: none;
+    border: none;
+    font-size: 20px;
+    cursor: pointer;
+    color: var(--text-secondary);
+}
+
+.close-memory-window:hover {
+    color: var(--text-primary);
+}
+
+.memory-window-body {
+    padding: 20px;
+    max-height: 70vh;
+    overflow-y: auto;
+}
+
+.memory-window-tokens {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+}
+
+.memory-window-summary {
+    font-size: 13px;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    line-height: 1.6;
+}
+
+.memory-window-keywords {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.memory-window-keyword {
+    background: var(--bg-secondary);
+    border-radius: 14px;
+    padding: 4px 10px;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+@media (max-width: 900px) {
+    .memory-body {
+        grid-template-columns: 1fr;
+    }
 }
 
 /* =================================== */

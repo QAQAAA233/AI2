@@ -179,6 +179,25 @@
                 </div>
             </div>
 
+            <div class="memory-panel" id="memoryPanel">
+                <div class="memory-header">
+                    <div>
+                        <h3>長短期記憶</h3>
+                        <div class="memory-subtitle" id="memoryStats"></div>
+                    </div>
+                </div>
+                <div class="memory-body">
+                    <div class="memory-column">
+                        <h4>長期記憶摘要</h4>
+                        <div class="memory-list empty" id="longTermMemoryList">尚無長期記憶摘要</div>
+                    </div>
+                    <div class="memory-column">
+                        <h4>短期上下文</h4>
+                        <div class="memory-list empty" id="shortTermMemoryList">尚無短期記憶</div>
+                    </div>
+                </div>
+            </div>
+
             <div class="results-container" id="resultsContainer" style="display: none;"></div>
         </div>
 
@@ -437,5 +456,19 @@
     </div>
 
     <script src="static/app.js"></script>
+
+    <div class="memory-window" id="memoryWindow">
+        <div class="memory-window-content">
+            <div class="memory-window-header">
+                <span>長期記憶摘要已建立</span>
+                <button class="close-memory-window" onclick="closeMemoryWindow()">×</button>
+            </div>
+            <div class="memory-window-body">
+                <div class="memory-window-tokens" id="memoryWindowTokens"></div>
+                <div class="memory-window-summary" id="memoryWindowSummary"></div>
+                <div class="memory-window-keywords" id="memoryWindowKeywords"></div>
+            </div>
+        </div>
+    </div>
 </body>
 </html>

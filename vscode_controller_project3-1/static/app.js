@@ -13,6 +13,8 @@ let allProjects = [];
 let modelConfig = null;
 let sidebarCollapsed = false;
 let MODEL_LIMITS = {};
+let conversationMemory = null;
+let latestMemorySnapshot = null;
 
 // ============================================
 // Loading Overlay 控制 - 修復版
@@ -43,6 +45,7 @@ function hideLoading() {
 // 初始化
 // ============================================
 window.addEventListener('DOMContentLoaded', () => {
+    clearMemoryPanel();
     loadConfig();
     loadSettings();
     loadProjectsList();
@@ -74,6 +77,15 @@ window.addEventListener('DOMContentLoaded', () => {
                 e.target.value = '';
             } finally {
                 hideLoading();
+            }
+        });
+    }
+
+    const memoryWindow = document.getElementById('memoryWindow');
+    if (memoryWindow) {
+        memoryWindow.addEventListener('click', (event) => {
+            if (event.target === memoryWindow) {
+                closeMemoryWindow();
             }
         });
     }
@@ -167,7 +179,7 @@ function updateAttachedFilesDisplay() {
     const section = document.getElementById('attachedFilesSection');
     const countBadge = document.getElementById('attachedFilesCount');
     const filesList = document.getElementById('attachedFilesList');
-    
+
     if (!section || !countBadge || !filesList) return;
     
     if (uploadedFiles.length === 0) {
@@ -315,7 +327,7 @@ function handleKeyDown(event) {
 async function handleSubmit() {
     const input = document.getElementById('mainInput');
     const prompt = input?.value.trim();
-    
+
     if (!prompt) return;
 
     if (!currentProjectDir) {
@@ -327,7 +339,15 @@ async function handleSubmit() {
     document.getElementById('emptyState').style.display = 'none';
     document.getElementById('resultsContainer').style.display = 'block';
 
-    addMessage('user', prompt);
+    const attachmentsForMessage = uploadedFiles.map(file => ({
+        name: file.name,
+        type: file.type,
+        size: file.size
+    }));
+
+    addMessage('user', prompt, null, null, attachmentsForMessage, {
+        timestamp: new Date().toISOString()
+    });
 
     input.value = '';
     updateSubmitButton();
@@ -355,21 +375,35 @@ async function handleSubmit() {
         const result = await response.json();
 
         if (result.success) {
-            addMessage('assistant', result.output, result.usage_metadata, result.terminal_output);
-            
+            addMessage('assistant', result.output, result.usage_metadata, result.terminal_output, null, {
+                timestamp: new Date().toISOString()
+            });
+
+            if ('memory' in result) {
+                if (result.memory) {
+                    updateMemoryPanel(result.memory);
+                } else {
+                    clearMemoryPanel();
+                }
+            }
+
+            if (result.new_memory_snapshot) {
+                showMemoryWindow(result.new_memory_snapshot);
+            }
+
             if (result.project) {
                 currentProject = result.project;
                 if (result.ai_response_json) {
                     currentProject.json_data = result.ai_response_json;
                     displayProjectStructure(result.ai_response_json.files);
                 }
-                
+
                 document.getElementById('currentProjectName').textContent = currentProject.name;
-                
+
                 if (!isIterationMode) {
                     const newProjectDir = currentProjectDir + '/' + currentProject.name;
                     currentProjectDir = newProjectDir;
-                    
+
                     isIterationMode = true;
                     const badge = document.getElementById('projectModeBadge');
                     if (badge) {
@@ -380,32 +414,49 @@ async function handleSubmit() {
             }
 
             showNotification(result.is_iteration ? '專案迭代成功!' : '專案創建成功!', 'success');
-            
+
             loadProjectsList();
             uploadedFiles = [];
             updateFilesPreview();
             updateAttachedFilesDisplay();
         } else {
-            addMessage('assistant', `✕ 執行失敗：${result.error || result.output}`);
+            addMessage('assistant', `✕ 執行失敗：${result.error || result.output}`, null, result.terminal_output, null, {
+                timestamp: new Date().toISOString()
+            });
             showNotification(`執行失敗：${result.error}`, 'error');
+
+            if ('memory' in result) {
+                if (result.memory) {
+                    updateMemoryPanel(result.memory);
+                } else {
+                    clearMemoryPanel();
+                }
+            }
+
+            loadProjectsList();
         }
     } catch (error) {
-        addMessage('assistant', `✕ 連接錯誤：${error}`);
+        addMessage('assistant', `✕ 連接錯誤：${error}`, null, null, null, {
+            timestamp: new Date().toISOString()
+        });
         showNotification(`連接錯誤：${error}`, 'error');
     } finally {
         hideLoading();
     }
 }
 
-function addMessage(role, content, usageMetadata = null, terminalOutput = null) {
+function addMessage(role, content, usageMetadata = null, terminalOutput = null, files = null, options = {}) {
     const container = document.getElementById('resultsContainer');
     if (!container) return;
-    
+
     const message = document.createElement('div');
     message.className = `result-message ${role} selectable`;
 
     const header = document.createElement('div');
     header.className = 'message-header';
+
+    const headerMain = document.createElement('div');
+    headerMain.className = 'message-header-main';
 
     const avatar = document.createElement('div');
     avatar.className = `avatar ${role}`;
@@ -415,29 +466,49 @@ function addMessage(role, content, usageMetadata = null, terminalOutput = null) 
     roleLabel.textContent = role === 'user' ? '您' : 'AI 助手';
     roleLabel.style.fontWeight = '500';
 
-    header.appendChild(avatar);
-    header.appendChild(roleLabel);
+    headerMain.appendChild(avatar);
+    headerMain.appendChild(roleLabel);
+    header.appendChild(headerMain);
+
+    const timestampValue = options.timestamp || new Date().toISOString();
+    if (timestampValue) {
+        const timeLabel = document.createElement('span');
+        timeLabel.className = 'message-timestamp';
+        timeLabel.textContent = formatTimestamp(timestampValue);
+        header.appendChild(timeLabel);
+    }
 
     const messageContent = document.createElement('div');
     messageContent.className = 'message-content selectable';
-    messageContent.textContent = content;
+    messageContent.textContent = content || '';
 
     message.appendChild(header);
     message.appendChild(messageContent);
-    
-    // ✅ Terminal輸出只顯示在用戶消息中
-    if (role === 'user' && terminalOutput && terminalOutput.trim()) {
+
+    const attachmentSection = renderAttachments(files);
+    if (attachmentSection) {
+        message.appendChild(attachmentSection);
+    }
+
+    if (terminalOutput && terminalOutput.trim()) {
         const terminalSection = document.createElement('div');
         terminalSection.className = 'terminal-output-section';
-        terminalSection.innerHTML = `
-            <div class="terminal-header">
-                <span class="terminal-title">Terminal 輸出</span>
-            </div>
-            <div class="terminal-body selectable">${terminalOutput}</div>
-        `;
+        const terminalHeader = document.createElement('div');
+        terminalHeader.className = 'terminal-header';
+        const terminalTitle = document.createElement('span');
+        terminalTitle.className = 'terminal-title';
+        terminalTitle.textContent = role === 'user' ? 'Terminal 輸出 (提交時)' : 'Terminal 輸出';
+        terminalHeader.appendChild(terminalTitle);
+
+        const terminalBody = document.createElement('div');
+        terminalBody.className = 'terminal-body selectable';
+        terminalBody.textContent = terminalOutput;
+
+        terminalSection.appendChild(terminalHeader);
+        terminalSection.appendChild(terminalBody);
         message.appendChild(terminalSection);
     }
-    
+
     // Token使用統計只顯示在AI回應中
     if (role === 'assistant' && usageMetadata && typeof usageMetadata === 'object') {
         const tokenUsage = document.createElement('div');
@@ -490,7 +561,7 @@ async function createNewProject() {
         if (result.success && result.path) {
             currentProjectDir = result.path;
             isIterationMode = false;
-            
+
             document.getElementById('currentProjectDisplay').style.display = 'block';
             document.getElementById('currentProjectName').textContent = '新專案';
             const badge = document.getElementById('projectModeBadge');
@@ -513,7 +584,8 @@ async function createNewProject() {
             document.getElementById('emptyState').style.display = 'none';
             document.getElementById('resultsContainer').style.display = 'block';
             document.getElementById('resultsContainer').innerHTML = '';
-            
+            clearMemoryPanel();
+
             showNotification('已選擇專案資料夾', 'success');
             document.getElementById('mainInput')?.focus();
         } else {
@@ -535,13 +607,15 @@ async function selectExistingFolder() {
         if (result.success && result.path) {
             currentProjectDir = result.path;
             isIterationMode = true;
-            
+
             uploadedFiles = [];
             updateFilesPreview();
             updateAttachedFilesDisplay();
-            
+
+            clearMemoryPanel();
+
             const loadResult = await loadExistingProject(result.path);
-            
+
             if (loadResult) {
                 document.getElementById('currentProjectDisplay').style.display = 'block';
                 document.getElementById('currentProjectName').textContent = currentProject.name;
@@ -715,13 +789,21 @@ async function loadExistingProject(projectDir) {
                 const container = document.getElementById('resultsContainer');
                 if (container) {
                     container.innerHTML = '';
-                    
+
                     for (const msg of result.conversation.messages) {
-                        addMessage(msg.role, msg.content, msg.usage_metadata, msg.terminal_output);
+                        addMessage(msg.role, msg.content, msg.usage_metadata, msg.terminal_output, msg.files, {
+                            timestamp: msg.timestamp
+                        });
                     }
                 }
             }
-            
+
+            if (result.conversation.memory) {
+                updateMemoryPanel(result.conversation.memory);
+            } else {
+                clearMemoryPanel();
+            }
+
             return true;
         } else {
             return false;
@@ -831,7 +913,8 @@ function resetToHome() {
     document.getElementById('resultsContainer').innerHTML = '';
     document.getElementById('projectStructureSection').style.display = 'none';
     document.getElementById('homeBtn').style.display = 'none';
-    
+    clearMemoryPanel();
+
     document.querySelectorAll('.project-item').forEach(item => {
         item.classList.remove('active');
     });
@@ -1211,4 +1294,279 @@ function showNotification(message, type = 'info') {
         toast.style.animation = 'slideIn 0.3s ease reverse';
         setTimeout(() => toast.remove(), 300);
     }, 5000);
+}
+
+// ============================================
+// 共用工具函式
+// ============================================
+
+function escapeHtml(text) {
+    if (typeof text !== 'string') return '';
+    return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+function formatTimestamp(timestamp) {
+    if (!timestamp) return '';
+    const date = new Date(timestamp);
+    if (Number.isNaN(date.getTime())) {
+        return timestamp;
+    }
+    return date.toLocaleString('zh-TW', {
+        hour12: false,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+    });
+}
+
+function createAttachmentIcon(typeOrName) {
+    const value = (typeOrName || '').toLowerCase();
+    if (!value) return '📎';
+    if (value.includes('image') || value.match(/\.(png|jpg|jpeg|gif|svg)$/)) return '🖼️';
+    if (value.includes('pdf') || value.endsWith('.pdf')) return '📄';
+    if (value.includes('zip') || value.includes('rar') || value.endsWith('.zip')) return '🗜️';
+    if (value.includes('code') || value.match(/\.(py|js|ts|html|css|json|sql|java|cpp|md)$/)) return '💻';
+    if (value.includes('text') || value.endsWith('.txt')) return '📝';
+    return '📎';
+}
+
+function renderAttachments(files) {
+    if (!Array.isArray(files) || files.length === 0) {
+        return null;
+    }
+
+    const container = document.createElement('div');
+    container.className = 'attachment-section';
+
+    const title = document.createElement('div');
+    title.className = 'attachment-title';
+    title.textContent = `附加檔案 (${files.length})`;
+    container.appendChild(title);
+
+    const list = document.createElement('div');
+    list.className = 'attachment-list';
+
+    files.forEach(file => {
+        if (!file) return;
+        const item = document.createElement('div');
+        item.className = 'attachment-item';
+
+        const icon = document.createElement('span');
+        icon.className = 'attachment-icon';
+        icon.textContent = createAttachmentIcon(file.type || file.name || file.mime);
+
+        const name = document.createElement('span');
+        name.className = 'attachment-name';
+        name.textContent = file.name || '未命名檔案';
+
+        item.appendChild(icon);
+        item.appendChild(name);
+
+        if (file.size) {
+            const size = document.createElement('span');
+            size.className = 'attachment-size';
+            const kb = Math.max(1, Math.round(file.size / 1024));
+            size.textContent = `${kb} KB`;
+            item.appendChild(size);
+        }
+
+        list.appendChild(item);
+    });
+
+    container.appendChild(list);
+    return container;
+}
+
+function clearMemoryPanel() {
+    conversationMemory = null;
+    latestMemorySnapshot = null;
+
+    const panel = document.getElementById('memoryPanel');
+    const longList = document.getElementById('longTermMemoryList');
+    const shortList = document.getElementById('shortTermMemoryList');
+    const stats = document.getElementById('memoryStats');
+
+    if (panel) {
+        panel.style.display = 'none';
+        panel.classList.remove('memory-alert');
+    }
+    if (stats) {
+        stats.textContent = '';
+    }
+    if (longList) {
+        longList.innerHTML = '';
+        longList.classList.add('empty');
+        longList.textContent = '尚無長期記憶摘要';
+    }
+    if (shortList) {
+        shortList.innerHTML = '';
+        shortList.classList.add('empty');
+        shortList.textContent = '尚無短期記憶';
+    }
+}
+
+function updateMemoryPanel(memory) {
+    const panel = document.getElementById('memoryPanel');
+    const stats = document.getElementById('memoryStats');
+    const longList = document.getElementById('longTermMemoryList');
+    const shortList = document.getElementById('shortTermMemoryList');
+
+    if (!panel || !stats || !longList || !shortList) return;
+
+    if (!memory) {
+        clearMemoryPanel();
+        return;
+    }
+
+    conversationMemory = memory;
+
+    panel.style.display = 'block';
+    if (memory.total_tokens >= memory.summary_threshold) {
+        panel.classList.add('memory-alert');
+    } else {
+        panel.classList.remove('memory-alert');
+    }
+
+    stats.textContent = `累積 Token 約 ${memory.total_tokens || 0} / 閾值 ${memory.summary_threshold || 0}`;
+
+    longList.innerHTML = '';
+    shortList.innerHTML = '';
+
+    if (memory.long_term && memory.long_term.length) {
+        longList.classList.remove('empty');
+        memory.long_term.forEach((snapshot, index) => {
+            const item = document.createElement('div');
+            item.className = 'memory-item';
+
+            const header = document.createElement('div');
+            header.className = 'memory-item-header';
+
+            const title = document.createElement('span');
+            title.className = 'memory-item-title';
+            title.textContent = `摘要 #${index + 1}`;
+
+            const meta = document.createElement('span');
+            meta.className = 'memory-item-meta';
+            meta.textContent = formatTimestamp(snapshot.created_at);
+
+            header.appendChild(title);
+            header.appendChild(meta);
+
+            const body = document.createElement('div');
+            body.className = 'memory-item-body';
+            body.textContent = snapshot.summary_text || '';
+
+            const footer = document.createElement('div');
+            footer.className = 'memory-item-footer';
+            footer.textContent = `覆蓋 ${snapshot.message_count || 0} 則訊息 / 約 ${snapshot.token_count || 0} tokens`;
+
+            item.appendChild(header);
+            item.appendChild(body);
+            item.appendChild(footer);
+
+            if (snapshot.keywords && snapshot.keywords.length) {
+                const keywordWrap = document.createElement('div');
+                keywordWrap.className = 'memory-keywords';
+                snapshot.keywords.forEach(keyword => {
+                    const tag = document.createElement('span');
+                    tag.className = 'memory-keyword';
+                    tag.textContent = keyword;
+                    keywordWrap.appendChild(tag);
+                });
+                item.appendChild(keywordWrap);
+            }
+
+            longList.appendChild(item);
+        });
+    } else {
+        longList.classList.add('empty');
+        longList.textContent = '尚無長期記憶摘要';
+    }
+
+    if (memory.short_term && memory.short_term.length) {
+        shortList.classList.remove('empty');
+        memory.short_term.forEach(msg => {
+            const item = document.createElement('div');
+            item.className = 'short-term-item';
+
+            const role = document.createElement('div');
+            role.className = 'short-term-item-role';
+            role.textContent = msg.role === 'user' ? '使用者' : 'AI';
+
+            const content = document.createElement('div');
+            content.className = 'short-term-item-content';
+            content.textContent = (msg.content_preview || '').trim();
+
+            const time = document.createElement('div');
+            time.className = 'short-term-item-time';
+            time.textContent = formatTimestamp(msg.timestamp);
+
+            item.appendChild(role);
+            item.appendChild(content);
+            item.appendChild(time);
+
+            if (msg.token_count) {
+                const tokenInfo = document.createElement('div');
+                tokenInfo.className = 'short-term-item-tokens';
+                tokenInfo.textContent = `約 ${msg.token_count} tokens`;
+                item.appendChild(tokenInfo);
+            }
+
+            shortList.appendChild(item);
+        });
+    } else {
+        shortList.classList.add('empty');
+        shortList.textContent = '尚無短期記憶';
+    }
+}
+
+function showMemoryWindow(snapshot) {
+    const windowEl = document.getElementById('memoryWindow');
+    const summaryEl = document.getElementById('memoryWindowSummary');
+    const keywordsEl = document.getElementById('memoryWindowKeywords');
+    const tokensEl = document.getElementById('memoryWindowTokens');
+
+    if (!snapshot || !windowEl || !summaryEl || !keywordsEl || !tokensEl) return;
+
+    if (latestMemorySnapshot && latestMemorySnapshot.summary_id === snapshot.summary_id) {
+        return;
+    }
+
+    latestMemorySnapshot = snapshot;
+
+    summaryEl.textContent = snapshot.summary_text || '';
+    tokensEl.textContent = `本次摘要覆蓋約 ${snapshot.token_count || 0} tokens，包含 ${snapshot.message_count || 0} 則訊息。`;
+
+    keywordsEl.innerHTML = '';
+    if (snapshot.keywords && snapshot.keywords.length) {
+        snapshot.keywords.forEach(keyword => {
+            const tag = document.createElement('span');
+            tag.className = 'memory-window-keyword';
+            tag.textContent = keyword;
+            keywordsEl.appendChild(tag);
+        });
+    } else {
+        const placeholder = document.createElement('span');
+        placeholder.className = 'memory-window-keyword';
+        placeholder.textContent = '無特定關鍵字';
+        keywordsEl.appendChild(placeholder);
+    }
+
+    windowEl.classList.add('active');
+    showNotification('已建立新的長期記憶摘要', 'info');
+}
+
+function closeMemoryWindow() {
+    const windowEl = document.getElementById('memoryWindow');
+    if (windowEl) {
+        windowEl.classList.remove('active');
+    }
 }

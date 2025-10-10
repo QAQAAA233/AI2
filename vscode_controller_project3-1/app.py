@@ -17,11 +17,13 @@ import json
 import platform
 import logging
 import queue
+from collections import Counter
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass, asdict, field
 from enum import Enum
+from uuid import uuid4
 
 # Web framework imports
 from flask import Flask, render_template, jsonify, request, send_file
@@ -181,10 +183,23 @@ class ConversationMessage:
     role: str
     content: str
     timestamp: str
+    message_id: str = ""
+    token_count: int = 0
     files: Optional[List[Dict]] = None
     metadata: Optional[Dict] = None
     terminal_output: Optional[str] = None
     usage_metadata: Optional[Dict] = None  # ⭐ 新增：直接保存 token 統計
+
+@dataclass
+class MemorySnapshot:
+    """長期記憶摘要結構"""
+    summary_id: str
+    created_at: str
+    summary_text: str
+    keywords: List[str] = field(default_factory=list)
+    related_messages: List[str] = field(default_factory=list)
+    token_count: int = 0
+    message_count: int = 0
 
 @dataclass
 class ProjectConversation:
@@ -194,6 +209,10 @@ class ProjectConversation:
     messages: List[ConversationMessage] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+    short_term_memory: List[str] = field(default_factory=list)
+    long_term_memory: List[MemorySnapshot] = field(default_factory=list)
+    total_token_estimate: int = 0
+    last_memory_update: str = ""
 
 @dataclass
 class ProcessResult:
@@ -211,6 +230,183 @@ class ProcessResult:
     is_iteration: bool = False
     usage_metadata: Optional[Dict] = None
     terminal_output: str = ""
+    memory_state: Optional[Dict] = None
+    new_memory_snapshot: Optional[Dict] = None
+
+
+class MemoryManager:
+    """長短期記憶管理器"""
+
+    SHORT_TERM_LIMIT = 8
+    SUMMARY_MIN_MESSAGES = 6
+    TOKEN_SUMMARY_THRESHOLD = 6000
+    KEYWORD_LIMIT = 6
+
+    @classmethod
+    def estimate_tokens(cls, text: str) -> int:
+        if not text:
+            return 0
+        # 簡易估算: 假設平均 4 字元一個 token
+        return max(1, len(text) // 4)
+
+    @classmethod
+    def ensure_message_token(cls, message: ConversationMessage) -> int:
+        if message.token_count and message.token_count > 0:
+            return message.token_count
+
+        if message.usage_metadata and isinstance(message.usage_metadata, dict):
+            total = message.usage_metadata.get('total_token_count')
+            if isinstance(total, int) and total > 0:
+                message.token_count = total
+                return message.token_count
+
+        message.token_count = cls.estimate_tokens(message.content or "")
+        return message.token_count
+
+    @classmethod
+    def calculate_total_tokens(cls, conversation: ProjectConversation) -> int:
+        total = 0
+        for msg in conversation.messages:
+            total += cls.ensure_message_token(msg)
+        conversation.total_token_estimate = total
+        return total
+
+    @classmethod
+    def refresh_short_term(cls, conversation: ProjectConversation):
+        conversation.short_term_memory = [
+            msg.message_id for msg in conversation.messages[-cls.SHORT_TERM_LIMIT :]
+            if msg.message_id
+        ]
+
+    @classmethod
+    def extract_keywords(cls, text: str) -> List[str]:
+        if not text:
+            return []
+
+        tokens = re.findall(r"[\w\u4e00-\u9fa5]{2,}", text.lower())
+        if not tokens:
+            return []
+
+        counter = Counter(tokens)
+        common = [word for word, _ in counter.most_common(cls.KEYWORD_LIMIT * 2)]
+        # 去除過短或常見詞
+        filtered = []
+        stop_words = {"the", "and", "with", "from", "this", "that", "have", "project", "code", "file"}
+        for word in common:
+            if len(word.strip()) < 2:
+                continue
+            if word in stop_words:
+                continue
+            filtered.append(word)
+            if len(filtered) >= cls.KEYWORD_LIMIT:
+                break
+        return filtered
+
+    @classmethod
+    def build_snapshot(cls, messages: List[ConversationMessage], token_count: int) -> Optional[MemorySnapshot]:
+        if not messages:
+            return None
+
+        lines = []
+        combined_text_parts = []
+        for msg in messages:
+            role_label = "使用者" if msg.role == 'user' else "AI"
+            snippet = re.sub(r"\s+", " ", msg.content or "").strip()
+            if len(snippet) > 100:
+                snippet = snippet[:97] + "..."
+            lines.append(f"• {role_label}: {snippet}")
+            combined_text_parts.append(msg.content or "")
+
+        summary_text = "近期重點摘要:\n" + "\n".join(lines)
+        keywords = cls.extract_keywords(" ".join(combined_text_parts))
+
+        snapshot = MemorySnapshot(
+            summary_id=f"mem_{uuid4().hex}",
+            created_at=datetime.now().isoformat(),
+            summary_text=summary_text,
+            keywords=keywords,
+            related_messages=[msg.message_id for msg in messages if msg.message_id],
+            token_count=token_count,
+            message_count=len(messages)
+        )
+        return snapshot
+
+    @classmethod
+    def summarize_if_needed(cls, conversation: ProjectConversation) -> Optional[MemorySnapshot]:
+        summarized_ids = set()
+        for snapshot in conversation.long_term_memory:
+            summarized_ids.update(snapshot.related_messages)
+
+        unsummarized_messages = [
+            msg for msg in conversation.messages if msg.message_id and msg.message_id not in summarized_ids
+        ]
+
+        if not unsummarized_messages:
+            return None
+
+        unsummarized_token = sum(cls.ensure_message_token(msg) for msg in unsummarized_messages)
+
+        should_summarize = (
+            unsummarized_token >= cls.TOKEN_SUMMARY_THRESHOLD
+            or len(unsummarized_messages) >= cls.SUMMARY_MIN_MESSAGES
+        )
+
+        if not should_summarize:
+            return None
+
+        snapshot = cls.build_snapshot(unsummarized_messages, unsummarized_token)
+        if snapshot:
+            conversation.long_term_memory.append(snapshot)
+            conversation.last_memory_update = datetime.now().isoformat()
+        return snapshot
+
+    @classmethod
+    def serialize_snapshot(cls, snapshot: MemorySnapshot) -> Dict[str, Any]:
+        return {
+            'summary_id': snapshot.summary_id,
+            'created_at': snapshot.created_at,
+            'summary_text': snapshot.summary_text,
+            'keywords': snapshot.keywords,
+            'related_messages': snapshot.related_messages,
+            'token_count': snapshot.token_count,
+            'message_count': snapshot.message_count
+        }
+
+    @classmethod
+    def serialize_memory(cls, conversation: ProjectConversation) -> Dict[str, Any]:
+        message_map = {msg.message_id: msg for msg in conversation.messages if msg.message_id}
+        short_term_data = []
+        for msg_id in conversation.short_term_memory:
+            msg = message_map.get(msg_id)
+            if not msg:
+                continue
+            short_term_data.append({
+                'message_id': msg_id,
+                'role': msg.role,
+                'content_preview': (msg.content or '')[:120],
+                'timestamp': msg.timestamp,
+                'token_count': msg.token_count
+            })
+
+        return {
+            'short_term': short_term_data,
+            'long_term': [cls.serialize_snapshot(snapshot) for snapshot in conversation.long_term_memory],
+            'total_tokens': conversation.total_token_estimate,
+            'summary_threshold': cls.TOKEN_SUMMARY_THRESHOLD,
+            'short_term_limit': cls.SHORT_TERM_LIMIT,
+            'last_memory_update': conversation.last_memory_update
+        }
+
+    @classmethod
+    def update_conversation_memory(cls, conversation: ProjectConversation) -> Dict[str, Any]:
+        cls.calculate_total_tokens(conversation)
+        cls.refresh_short_term(conversation)
+        snapshot = cls.summarize_if_needed(conversation)
+        memory_state = cls.serialize_memory(conversation)
+        result: Dict[str, Any] = {'memory': memory_state}
+        if snapshot:
+            result['new_snapshot'] = cls.serialize_snapshot(snapshot)
+        return result
 
 # ============================================
 # JSON Schema 定義 - 繁體中文化
@@ -429,7 +625,7 @@ class ConversationManager:
     def load_conversation(project_dir: str) -> ProjectConversation:
         """載入專案對話歷史 - 正確處理 usage_metadata"""
         conv_file = ConversationManager.get_conversation_file(project_dir)
-        
+
         if not conv_file.exists():
             project_name = Path(project_dir).name
             conv = ProjectConversation(
@@ -439,35 +635,72 @@ class ConversationManager:
                 updated_at=datetime.now().isoformat()
             )
             return conv
-        
+
         try:
             with open(conv_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                messages = []
-                for msg_data in data.get('messages', []):
-                    # ⭐ 關鍵修復：正確處理 usage_metadata
-                    usage_metadata = msg_data.get('usage_metadata')
-                    if not usage_metadata and msg_data.get('metadata'):
-                        # 向後兼容：從 metadata 中提取 usage_metadata
-                        usage_metadata = msg_data['metadata'].get('usage_metadata')
-                    
-                    messages.append(ConversationMessage(
-                        role=msg_data['role'],
-                        content=msg_data['content'],
-                        timestamp=msg_data['timestamp'],
-                        files=msg_data.get('files'),
-                        metadata=msg_data.get('metadata'),
-                        terminal_output=msg_data.get('terminal_output'),
-                        usage_metadata=usage_metadata  # ⭐ 直接保存
-                    ))
-                
-                return ProjectConversation(
-                    project_dir=data['project_dir'],
-                    project_name=data['project_name'],
-                    messages=messages,
-                    created_at=data.get('created_at', ''),
-                    updated_at=data.get('updated_at', '')
+
+            messages: List[ConversationMessage] = []
+            for index, msg_data in enumerate(data.get('messages', [])):
+                usage_metadata = msg_data.get('usage_metadata')
+                if not usage_metadata and msg_data.get('metadata'):
+                    usage_metadata = msg_data['metadata'].get('usage_metadata')
+
+                message_id = msg_data.get('message_id') or f"msg_{index + 1}_{uuid4().hex[:8]}"
+                timestamp = msg_data.get('timestamp') or datetime.now().isoformat()
+                message = ConversationMessage(
+                    role=msg_data.get('role', 'assistant'),
+                    content=msg_data.get('content', ''),
+                    timestamp=timestamp,
+                    message_id=message_id,
+                    token_count=msg_data.get('token_count', 0),
+                    files=msg_data.get('files'),
+                    metadata=msg_data.get('metadata'),
+                    terminal_output=msg_data.get('terminal_output'),
+                    usage_metadata=usage_metadata
                 )
+                MemoryManager.ensure_message_token(message)
+                messages.append(message)
+
+            long_term_memory: List[MemorySnapshot] = []
+            for snapshot_data in data.get('long_term_memory', []):
+                try:
+                    long_term_memory.append(MemorySnapshot(
+                        summary_id=snapshot_data.get('summary_id', f"mem_{uuid4().hex}"),
+                        created_at=snapshot_data.get('created_at', datetime.now().isoformat()),
+                        summary_text=snapshot_data.get('summary_text', ''),
+                        keywords=snapshot_data.get('keywords', []),
+                        related_messages=snapshot_data.get('related_messages', []),
+                        token_count=snapshot_data.get('token_count', 0),
+                        message_count=snapshot_data.get('message_count', 0)
+                    ))
+                except Exception as err:
+                    logger.warning(f"載入長期記憶摘要失敗: {err}")
+
+            conversation = ProjectConversation(
+                project_dir=data.get('project_dir', project_dir),
+                project_name=data.get('project_name', Path(project_dir).name),
+                messages=messages,
+                created_at=data.get('created_at', ''),
+                updated_at=data.get('updated_at', ''),
+                short_term_memory=data.get('short_term_memory', []),
+                long_term_memory=long_term_memory,
+                total_token_estimate=data.get('total_token_estimate', 0),
+                last_memory_update=data.get('last_memory_update', data.get('updated_at', ''))
+            )
+
+            if not conversation.project_name:
+                conversation.project_name = Path(project_dir).name
+
+            MemoryManager.calculate_total_tokens(conversation)
+
+            if not conversation.short_term_memory:
+                MemoryManager.refresh_short_term(conversation)
+
+            if not conversation.last_memory_update:
+                conversation.last_memory_update = conversation.updated_at or datetime.now().isoformat()
+
+            return conversation
         except Exception as e:
             logger.error(f"載入對話歷史失敗: {e}")
             return ProjectConversation(
@@ -483,32 +716,54 @@ class ConversationManager:
         try:
             conv_file = ConversationManager.get_conversation_file(conversation.project_dir)
             conversation.updated_at = datetime.now().isoformat()
-            
-            # ⭐ 關鍵修復：使用自定義序列化保留 usage_metadata
+
+            MemoryManager.calculate_total_tokens(conversation)
+            MemoryManager.refresh_short_term(conversation)
+
+            if not conversation.created_at:
+                if conversation.messages:
+                    conversation.created_at = conversation.messages[0].timestamp
+                else:
+                    conversation.created_at = datetime.now().isoformat()
+
             messages_data = []
             for msg in conversation.messages:
+                MemoryManager.ensure_message_token(msg)
                 msg_dict = {
                     'role': msg.role,
                     'content': msg.content,
                     'timestamp': msg.timestamp,
+                    'message_id': msg.message_id,
+                    'token_count': msg.token_count,
                     'files': msg.files,
                     'metadata': msg.metadata,
                     'terminal_output': msg.terminal_output,
-                    'usage_metadata': msg.usage_metadata  # ⭐ 直接保存
+                    'usage_metadata': msg.usage_metadata
                 }
                 messages_data.append(msg_dict)
-            
+
+            long_term_data: List[Dict[str, Any]] = []
+            for snapshot in conversation.long_term_memory:
+                if isinstance(snapshot, MemorySnapshot):
+                    long_term_data.append(asdict(snapshot))
+                elif isinstance(snapshot, dict):
+                    long_term_data.append(snapshot)
+
             data = {
                 'project_dir': conversation.project_dir,
                 'project_name': conversation.project_name,
                 'messages': messages_data,
                 'created_at': conversation.created_at,
-                'updated_at': conversation.updated_at
+                'updated_at': conversation.updated_at,
+                'short_term_memory': conversation.short_term_memory,
+                'long_term_memory': long_term_data,
+                'total_token_estimate': conversation.total_token_estimate,
+                'last_memory_update': conversation.last_memory_update
             }
-            
+
             with open(conv_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-            
+
             logger.info(f"對話歷史已儲存: {conversation.project_name}")
             return True
         except Exception as e:
@@ -516,24 +771,39 @@ class ConversationManager:
             return False
     
     @staticmethod
-    def add_message(project_dir: str, role: str, content: str, files: Optional[List[Dict]] = None, 
+    def add_message(project_dir: str, role: str, content: str, files: Optional[List[Dict]] = None,
                    metadata: Optional[Dict] = None, terminal_output: Optional[str] = None,
                    usage_metadata: Optional[Dict] = None):  # ⭐ 新增參數
         """添加消息到對話歷史 - 支持 usage_metadata"""
         conversation = ConversationManager.load_conversation(project_dir)
-        
+
+        message_id = f"msg_{len(conversation.messages) + 1}_{uuid4().hex[:8]}"
         message = ConversationMessage(
             role=role,
             content=content,
             timestamp=datetime.now().isoformat(),
+            message_id=message_id,
+            token_count=0,
             files=files,
             metadata=metadata,
             terminal_output=terminal_output,
-            usage_metadata=usage_metadata  # ⭐ 直接保存
+            usage_metadata=usage_metadata
         )
-        
+
+        MemoryManager.ensure_message_token(message)
         conversation.messages.append(message)
+
+        memory_update = MemoryManager.update_conversation_memory(conversation)
         ConversationManager.save_conversation(conversation)
+
+        return {
+            'message': {
+                'message_id': message.message_id,
+                'role': message.role,
+                'timestamp': message.timestamp
+            },
+            **memory_update
+        }
     
     @staticmethod
     def delete_conversation_file(project_dir: str) -> bool:
@@ -1685,13 +1955,18 @@ class ProcessManager:
                     result.terminal_output = terminal_output
             
             # ⭐ 修復:在正確的時機保存用戶消息
-            ConversationManager.add_message(
+            user_memory_update = ConversationManager.add_message(
                 folder_path,
                 'user',
                 prompt,
                 files=[{'name': f.get('name'), 'type': f.get('type')} for f in (files or [])],
                 terminal_output=terminal_output
             )
+
+            if user_memory_update:
+                result.memory_state = user_memory_update.get('memory', result.memory_state)
+                if user_memory_update.get('new_snapshot'):
+                    result.new_memory_snapshot = user_memory_update['new_snapshot']
             
             if is_iteration and attach_screenshot:
                 project_info = ProjectManager.load_project_info(folder_path)
@@ -1820,13 +2095,18 @@ class ProcessManager:
                     result.output += "\n=== 🔍 檢測到程式碼區塊 ===\n您可以手動複製下方 AI 回應中的程式碼。"
                 
                 # ⭐ 修復:使用正確的路徑保存錯誤消息
-                ConversationManager.add_message(
+                error_memory_update = ConversationManager.add_message(
                     folder_path,
                     'assistant',
                     result.output,
                     metadata={'error': True, 'error_type': 'parse_error'}
                 )
-                
+
+                if error_memory_update:
+                    result.memory_state = error_memory_update.get('memory', result.memory_state)
+                    if error_memory_update.get('new_snapshot'):
+                        result.new_memory_snapshot = error_memory_update['new_snapshot']
+
                 return result
             
             if is_iteration:
@@ -2049,7 +2329,7 @@ class ProcessManager:
             result.success = True
             
             # ⭐ 關鍵修復:使用最終路徑和正確的 usage_metadata 保存AI回應
-            ConversationManager.add_message(
+            assistant_memory_update = ConversationManager.add_message(
                 final_project_dir,  # ✅ 使用最終專案路徑
                 'assistant',
                 result.output,
@@ -2060,6 +2340,11 @@ class ProcessManager:
                 terminal_output=result.terminal_output,
                 usage_metadata=usage_metadata  # ⭐ 直接傳遞 usage_metadata
             )
+
+            if assistant_memory_update:
+                result.memory_state = assistant_memory_update.get('memory', result.memory_state)
+                if assistant_memory_update.get('new_snapshot'):
+                    result.new_memory_snapshot = assistant_memory_update['new_snapshot']
             
         except Exception as e:
             result.error = str(e)
@@ -2071,12 +2356,17 @@ class ProcessManager:
                 result.ai_response = "無法獲取 AI 回應"
             
             # 錯誤情況下也保存消息
-            ConversationManager.add_message(
+            failure_memory_update = ConversationManager.add_message(
                 folder_path,
                 'assistant',
                 f"執行失敗: {result.error}",
                 metadata={'error': True, 'error_type': 'execution_error'}
             )
+
+            if failure_memory_update:
+                result.memory_state = failure_memory_update.get('memory', result.memory_state)
+                if failure_memory_update.get('new_snapshot'):
+                    result.new_memory_snapshot = failure_memory_update['new_snapshot']
         
         return result
 
@@ -2173,6 +2463,8 @@ def load_project():
                 'role': msg.role,
                 'content': msg.content,
                 'timestamp': msg.timestamp,
+                'message_id': msg.message_id,
+                'token_count': msg.token_count,
                 'files': msg.files,
                 'metadata': msg.metadata,
                 'terminal_output': msg.terminal_output,
@@ -2189,7 +2481,8 @@ def load_project():
             'conversation': {
                 'messages': messages_data,
                 'created_at': conversation.created_at,
-                'updated_at': conversation.updated_at
+                'updated_at': conversation.updated_at,
+                'memory': MemoryManager.serialize_memory(conversation)
             }
         })
         
@@ -2216,6 +2509,8 @@ def get_conversation(project_dir):
                 'role': msg.role,
                 'content': msg.content,
                 'timestamp': msg.timestamp,
+                'message_id': msg.message_id,
+                'token_count': msg.token_count,
                 'files': msg.files,
                 'metadata': msg.metadata,
                 'terminal_output': msg.terminal_output,
@@ -2229,7 +2524,8 @@ def get_conversation(project_dir):
                 'project_name': conversation.project_name,
                 'messages': messages_data,
                 'created_at': conversation.created_at,
-                'updated_at': conversation.updated_at
+                'updated_at': conversation.updated_at,
+                'memory': MemoryManager.serialize_memory(conversation)
             }
         })
     except Exception as e:
@@ -2324,7 +2620,9 @@ def run_process():
             'screenshots': result.screenshots,
             'is_iteration': result.is_iteration,
             'usage_metadata': result.usage_metadata,
-            'terminal_output': result.terminal_output
+            'terminal_output': result.terminal_output,
+            'memory': result.memory_state,
+            'new_memory_snapshot': result.new_memory_snapshot
         }
         
         if result.project_data:
