@@ -179,7 +179,55 @@
                 </div>
             </div>
 
-            <div class="results-container" id="resultsContainer" style="display: none;"></div>
+            <div class="conversation-layout" id="conversationLayout">
+                <div class="results-container" id="resultsContainer" style="display: none;"></div>
+                <aside class="memory-drawer" id="memoryDrawer" style="display: none;">
+                    <div class="memory-panel" id="memoryPanel">
+                        <div class="memory-panel-header">
+                            <div class="memory-title-group">
+                                <h3>記憶與評分</h3>
+                                <span class="memory-project-label" id="memoryProjectLabel">尚未選擇專案</span>
+                            </div>
+                            <div class="memory-header-actions">
+                                <span class="memory-score" id="memoryScoreDisplay">--</span>
+                                <button class="memory-collapse-btn" id="memoryCollapseBtn" onclick="toggleMemoryPanel()" aria-label="收合記憶面板">
+                                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="8 5 16 12 8 19"/>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="memory-panel-body" id="memoryPanelBody">
+                            <section class="memory-section">
+                                <h4>品質評分</h4>
+                                <div class="memory-evaluation-list" id="memoryEvaluationList"></div>
+                            </section>
+                            <section class="memory-section">
+                                <h4>專案摘要</h4>
+                                <p class="memory-text" id="memorySummaryBox">尚未建立專案總結</p>
+                            </section>
+                            <section class="memory-section">
+                                <h4>短期記憶</h4>
+                                <div class="memory-text-list" id="memorySTMBox">尚未累積短期記憶</div>
+                            </section>
+                            <section class="memory-section">
+                                <h4>長期記憶</h4>
+                                <div class="memory-text-list" id="memoryLTMBox">尚未建立長期記憶</div>
+                            </section>
+                            <section class="memory-section">
+                                <h4>專案目標</h4>
+                                <div class="memory-goals-list" id="memoryGoalsList"></div>
+                            </section>
+                        </div>
+                    </div>
+                    <button class="memory-toggle-tab" id="memoryToggleTab" type="button" onclick="toggleMemoryPanel()" aria-controls="memoryPanel" aria-expanded="true">
+                        <svg class="memory-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="8 5 16 12 8 19"/>
+                        </svg>
+                        <span class="tab-label">記憶</span>
+                    </button>
+                </aside>
+            </div>
         </div>
 
         <div class="input-area">
@@ -217,6 +265,20 @@
                                 </svg>
                                 <span>附加 Terminal 輸出</span>
                             </div>
+                            <div class="menu-item" id="memoryMenuItem" onclick="toggleAutoAttachMemory()">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 20l9-5-9-5-9 5 9 5z"/>
+                                    <path d="M3 10l9-5 9 5"/>
+                                </svg>
+                                <span>自動附加記憶上下文</span>
+                            </div>
+                            <div class="menu-item" id="diagnosticsMenuItem" onclick="toggleAttachDiagnostics()">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M19 7h-1V5a2 2 0 00-2-2h-2V1h-2v2H8a2 2 0 00-2 2v2H5a2 2 0 00-2 2v2h2v2H3v2h2v2a2 2 0 002 2h2v2h2v-2h2a2 2 0 002-2v-2h2v-2h-2v-2h2V9a2 2 0 00-2-2z"/>
+                                </svg>
+                                <span>語法偵錯報告</span>
+                            </div>
+                            <div class="menu-hint" id="memorySuggestionPreview">上一輪改進建議：尚未有資料</div>
                             <div class="menu-divider"></div>
                             <div class="menu-item" onclick="showAdvancedSettings()">
                                 <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
