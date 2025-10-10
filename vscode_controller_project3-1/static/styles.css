@@ -928,6 +928,192 @@ body {
 }
 
 /* =================================== */
+/* 訊息附件展示 */
+/* =================================== */
+.message-attachments {
+    margin-top: 12px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-light);
+    border-radius: 8px;
+    padding: 12px;
+}
+
+.attachments-header {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.attachments-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.attachment-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-light);
+    font-size: 12px;
+    color: var(--text-primary);
+}
+
+.attachment-icon {
+    font-size: 14px;
+}
+
+.attachment-name {
+    max-width: 160px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* =================================== */
+/* 記憶面板 */
+/* =================================== */
+.memory-summary-card {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-light);
+    border-radius: 10px;
+    padding: 12px;
+    margin-bottom: 12px;
+}
+
+.memory-summary-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.memory-summary-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.open-memory-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: none;
+    border-radius: 8px;
+    background: var(--primary-color);
+    color: #fff;
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 12px;
+    transition: background 0.2s ease;
+}
+
+.open-memory-btn:hover {
+    background: var(--primary-hover);
+}
+
+.open-memory-btn .icon {
+    width: 16px;
+    height: 16px;
+}
+
+.memory-summary-body {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+    white-space: pre-wrap;
+}
+
+.memory-meta-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+}
+
+.memory-token-usage {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.memory-entries-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 260px;
+    overflow-y: auto;
+}
+
+.memory-entry {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-light);
+    border-radius: 10px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.memory-entry-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.memory-entry-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.memory-entry-time {
+    font-size: 11px;
+    color: var(--text-tertiary);
+}
+
+.memory-entry-summary {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+    white-space: pre-wrap;
+}
+
+.memory-entry-keywords {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.keyword-chip {
+    padding: 4px 8px;
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-size: 11px;
+}
+
+.memory-entry-meta {
+    font-size: 11px;
+    color: var(--text-tertiary);
+}
+
+.memory-empty {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    padding: 4px 0;
+}
+
+/* =================================== */
 /* 模態框 */
 /* =================================== */
 .modal-overlay {

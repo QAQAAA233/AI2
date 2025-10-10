@@ -13,6 +13,10 @@ let allProjects = [];
 let modelConfig = null;
 let sidebarCollapsed = false;
 let MODEL_LIMITS = {};
+let memorySettings = { summary_message_limit: 6, token_threshold: 6000 };
+let latestMemorySnapshot = null;
+let lastUserMessageElement = null;
+let lastAutoOpenToken = 0;
 
 // ============================================
 // Loading Overlay 控制 - 修復版
@@ -95,6 +99,14 @@ async function loadConfig() {
             'gemini-1.5-flash': { name: 'Gemini 1.5 Flash', inputLimit: 1048576, outputLimit: 8192 }
         };
         modelConfig = config;
+        if (config.memory_settings) {
+            memorySettings = {
+                summary_message_limit: config.memory_settings.summary_message_limit ?? 6,
+                token_threshold: config.memory_settings.token_threshold ?? 6000
+            };
+        } else {
+            memorySettings = { summary_message_limit: 6, token_threshold: 6000 };
+        }
     } catch (error) {
         console.error('載入配置失敗:', error);
     }
@@ -228,12 +240,16 @@ function toggleProjectPanel() {
 }
 
 function updateProjectPanelVisibility() {
-    const hasProject = document.getElementById('projectStructureSection')?.style.display !== 'none';
-    const hasAttached = uploadedFiles.length > 0;
+    const projectSection = document.getElementById('projectStructureSection');
+    const attachedSection = document.getElementById('attachedFilesSection');
+    const memorySection = document.getElementById('memoryPanelSection');
+    const hasProject = projectSection && projectSection.style.display !== 'none';
+    const hasAttached = attachedSection && attachedSection.style.display !== 'none' && attachedSection.querySelectorAll('.attached-file-item').length > 0;
+    const hasMemory = memorySection && memorySection.style.display !== 'none';
     const emptyState = document.getElementById('panelEmptyState');
-    
+
     if (emptyState) {
-        emptyState.style.display = (hasProject || hasAttached) ? 'none' : 'block';
+        emptyState.style.display = (hasProject || hasAttached || hasMemory) ? 'none' : 'block';
     }
 }
 
@@ -327,7 +343,9 @@ async function handleSubmit() {
     document.getElementById('emptyState').style.display = 'none';
     document.getElementById('resultsContainer').style.display = 'block';
 
-    addMessage('user', prompt);
+    const attachmentPreview = normalizeAttachments(uploadedFiles);
+    const placeholderTerminal = attachTerminal ? '正在擷取 Terminal 輸出...' : null;
+    lastUserMessageElement = addMessage('user', prompt, null, placeholderTerminal, attachmentPreview);
 
     input.value = '';
     updateSubmitButton();
@@ -355,8 +373,12 @@ async function handleSubmit() {
         const result = await response.json();
 
         if (result.success) {
+            if (lastUserMessageElement) {
+                updateMessageTerminal(lastUserMessageElement, result.terminal_output || '');
+                lastUserMessageElement = null;
+            }
             addMessage('assistant', result.output, result.usage_metadata, result.terminal_output);
-            
+
             if (result.project) {
                 currentProject = result.project;
                 if (result.ai_response_json) {
@@ -380,16 +402,26 @@ async function handleSubmit() {
             }
 
             showNotification(result.is_iteration ? '專案迭代成功!' : '專案創建成功!', 'success');
-            
+
             loadProjectsList();
             uploadedFiles = [];
             updateFilesPreview();
             updateAttachedFilesDisplay();
+            updateMemoryDisplay(result.memory_snapshot || latestMemorySnapshot);
         } else {
+            if (lastUserMessageElement) {
+                updateMessageTerminal(lastUserMessageElement, result.terminal_output || '');
+                lastUserMessageElement = null;
+            }
             addMessage('assistant', `✕ 執行失敗：${result.error || result.output}`);
             showNotification(`執行失敗：${result.error}`, 'error');
+            updateMemoryDisplay(result.memory_snapshot || latestMemorySnapshot);
         }
     } catch (error) {
+        if (lastUserMessageElement) {
+            updateMessageTerminal(lastUserMessageElement, '');
+            lastUserMessageElement = null;
+        }
         addMessage('assistant', `✕ 連接錯誤：${error}`);
         showNotification(`連接錯誤：${error}`, 'error');
     } finally {
@@ -397,7 +429,123 @@ async function handleSubmit() {
     }
 }
 
-function addMessage(role, content, usageMetadata = null, terminalOutput = null) {
+function normalizeAttachments(files = []) {
+    if (!Array.isArray(files)) return [];
+    return files.map(file => ({
+        name: file?.name || file?.filename || '未命名檔案',
+        type: file?.type || file?.filetype || 'text/plain'
+    })).filter(Boolean);
+}
+
+function determineFileExtension(name = '') {
+    const parts = name.split('.');
+    if (parts.length <= 1) return '';
+    return parts.pop().toLowerCase();
+}
+
+function getFileIcon(file) {
+    const type = (file?.type || '').toLowerCase();
+    const name = (file?.name || file?.filename || '').toLowerCase();
+    const ext = determineFileExtension(name);
+
+    if (type.startsWith('image/')) return '🖼️';
+    if (type.startsWith('video/')) return '🎞️';
+    if (type.startsWith('audio/')) return '🎧';
+
+    switch (ext) {
+        case 'py':
+            return '🐍';
+        case 'js':
+        case 'ts':
+            return '🧠';
+        case 'html':
+            return '🌐';
+        case 'css':
+            return '🎨';
+        case 'json':
+            return '🗂️';
+        case 'md':
+        case 'txt':
+            return '📝';
+        case 'pdf':
+            return '📕';
+        case 'zip':
+        case 'rar':
+            return '🗜️';
+        case 'png':
+        case 'jpg':
+        case 'jpeg':
+        case 'gif':
+            return '🖼️';
+        default:
+            return '📄';
+    }
+}
+
+function createAttachmentChip(file) {
+    const chip = document.createElement('div');
+    chip.className = 'attachment-chip';
+    chip.title = `${file.name}`;
+
+    const icon = document.createElement('span');
+    icon.className = 'attachment-icon';
+    icon.textContent = getFileIcon(file);
+
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'attachment-name';
+    nameSpan.textContent = file.name || '未命名檔案';
+
+    chip.appendChild(icon);
+    chip.appendChild(nameSpan);
+    return chip;
+}
+
+function renderAttachmentsSection(files = []) {
+    const normalized = normalizeAttachments(files);
+    if (!normalized.length) return null;
+
+    const section = document.createElement('div');
+    section.className = 'message-attachments';
+
+    const header = document.createElement('div');
+    header.className = 'attachments-header';
+    header.textContent = '附加檔案';
+    section.appendChild(header);
+
+    const list = document.createElement('div');
+    list.className = 'attachments-list';
+    normalized.forEach(file => list.appendChild(createAttachmentChip(file)));
+    section.appendChild(list);
+
+    return section;
+}
+
+function updateMessageTerminal(messageElement, terminalOutput) {
+    if (!messageElement) return;
+    let terminalSection = messageElement.querySelector('.terminal-output-section');
+
+    if (terminalOutput && terminalOutput.trim()) {
+        if (!terminalSection) {
+            terminalSection = document.createElement('div');
+            terminalSection.className = 'terminal-output-section';
+            terminalSection.innerHTML = `
+                <div class="terminal-header">
+                    <span class="terminal-title">Terminal 輸出</span>
+                </div>
+                <div class="terminal-body selectable"></div>
+            `;
+            messageElement.appendChild(terminalSection);
+        }
+        const body = terminalSection.querySelector('.terminal-body');
+        if (body) {
+            body.textContent = terminalOutput;
+        }
+    } else if (terminalSection) {
+        terminalSection.remove();
+    }
+}
+
+function addMessage(role, content, usageMetadata = null, terminalOutput = null, files = []) {
     const container = document.getElementById('resultsContainer');
     if (!container) return;
     
@@ -420,24 +568,21 @@ function addMessage(role, content, usageMetadata = null, terminalOutput = null) 
 
     const messageContent = document.createElement('div');
     messageContent.className = 'message-content selectable';
-    messageContent.textContent = content;
+    messageContent.textContent = content ?? '';
 
     message.appendChild(header);
     message.appendChild(messageContent);
-    
-    // ✅ Terminal輸出只顯示在用戶消息中
-    if (role === 'user' && terminalOutput && terminalOutput.trim()) {
-        const terminalSection = document.createElement('div');
-        terminalSection.className = 'terminal-output-section';
-        terminalSection.innerHTML = `
-            <div class="terminal-header">
-                <span class="terminal-title">Terminal 輸出</span>
-            </div>
-            <div class="terminal-body selectable">${terminalOutput}</div>
-        `;
-        message.appendChild(terminalSection);
+
+    const attachmentsSection = renderAttachmentsSection(files);
+    if (attachmentsSection) {
+        message.appendChild(attachmentsSection);
     }
-    
+
+    // ✅ Terminal輸出只顯示在用戶消息中
+    if (role === 'user') {
+        updateMessageTerminal(message, terminalOutput);
+    }
+
     // Token使用統計只顯示在AI回應中
     if (role === 'assistant' && usageMetadata && typeof usageMetadata === 'object') {
         const tokenUsage = document.createElement('div');
@@ -465,6 +610,7 @@ function addMessage(role, content, usageMetadata = null, terminalOutput = null) 
     
     container.appendChild(message);
     message.scrollIntoView({ behavior: 'smooth' });
+    return message;
 }
 
 function useSuggestion(text) {
@@ -508,7 +654,10 @@ async function createNewProject() {
             uploadedFiles = [];
             updateFilesPreview();
             updateAttachedFilesDisplay();
-            
+            updateMemoryDisplay(null);
+            latestMemorySnapshot = null;
+            lastAutoOpenToken = 0;
+
             document.getElementById('projectStructureSection').style.display = 'none';
             document.getElementById('emptyState').style.display = 'none';
             document.getElementById('resultsContainer').style.display = 'block';
@@ -539,9 +688,12 @@ async function selectExistingFolder() {
             uploadedFiles = [];
             updateFilesPreview();
             updateAttachedFilesDisplay();
-            
+            updateMemoryDisplay(null);
+            latestMemorySnapshot = null;
+            lastAutoOpenToken = 0;
+
             const loadResult = await loadExistingProject(result.path);
-            
+
             if (loadResult) {
                 document.getElementById('currentProjectDisplay').style.display = 'block';
                 document.getElementById('currentProjectName').textContent = currentProject.name;
@@ -574,6 +726,9 @@ async function selectExistingFolder() {
                 
                 document.getElementById('homeBtn').style.display = 'flex';
                 document.getElementById('projectStructureSection').style.display = 'none';
+                updateMemoryDisplay(null);
+                latestMemorySnapshot = null;
+                lastAutoOpenToken = 0;
             }
             
             document.getElementById('mainInput')?.focus();
@@ -715,13 +870,22 @@ async function loadExistingProject(projectDir) {
                 const container = document.getElementById('resultsContainer');
                 if (container) {
                     container.innerHTML = '';
-                    
+
                     for (const msg of result.conversation.messages) {
-                        addMessage(msg.role, msg.content, msg.usage_metadata, msg.terminal_output);
+                        addMessage(
+                            msg.role,
+                            msg.content,
+                            msg.usage_metadata,
+                            msg.terminal_output,
+                            msg.files || []
+                        );
                     }
                 }
+                const memorySnapshot = result.conversation.memory_snapshot || null;
+                lastAutoOpenToken = memorySnapshot?.total_token_usage || 0;
+                updateMemoryDisplay(memorySnapshot);
             }
-            
+
             return true;
         } else {
             return false;
@@ -738,7 +902,7 @@ function displayProjectStructure(files) {
     const section = document.getElementById('projectStructureSection');
     const filesList = document.getElementById('projectFilesList');
     const countBadge = document.getElementById('projectFilesCount');
-    
+
     if (!section || !filesList || !countBadge) return;
     
     if (!files || files.length === 0) {
@@ -782,6 +946,136 @@ function displayProjectStructure(files) {
     });
     
     updateProjectPanelVisibility();
+}
+
+function formatDateTime(value) {
+    if (!value) return '未知時間';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+        return value;
+    }
+    return date.toLocaleString('zh-TW', { hour12: false });
+}
+
+function renderMemoryEntry(entry) {
+    const item = document.createElement('div');
+    item.className = 'memory-entry';
+
+    const header = document.createElement('div');
+    header.className = 'memory-entry-header';
+
+    const title = document.createElement('div');
+    title.className = 'memory-entry-title';
+    title.textContent = entry.topic || '未命名主題';
+
+    const time = document.createElement('div');
+    time.className = 'memory-entry-time';
+    time.textContent = formatDateTime(entry.updated_at || entry.created_at);
+
+    header.appendChild(title);
+    header.appendChild(time);
+    item.appendChild(header);
+
+    const summary = document.createElement('div');
+    summary.className = 'memory-entry-summary';
+    summary.textContent = entry.summary || '尚無摘要。';
+    item.appendChild(summary);
+
+    if (entry.keywords && entry.keywords.length) {
+        const keywordsRow = document.createElement('div');
+        keywordsRow.className = 'memory-entry-keywords';
+        entry.keywords.forEach(keyword => {
+            const chip = document.createElement('span');
+            chip.className = 'keyword-chip';
+            chip.textContent = keyword;
+            keywordsRow.appendChild(chip);
+        });
+        item.appendChild(keywordsRow);
+    }
+
+    const meta = document.createElement('div');
+    meta.className = 'memory-entry-meta';
+    const relatedCount = entry.related_messages ? entry.related_messages.length : 0;
+    meta.textContent = `相關訊息：${relatedCount}`;
+    item.appendChild(meta);
+
+    return item;
+}
+
+function updateMemoryDisplay(memorySnapshot) {
+    const section = document.getElementById('memoryPanelSection');
+    const summaryEl = document.getElementById('memorySummaryText');
+    const tokenUsageEl = document.getElementById('memoryTokenUsage');
+    const entriesContainer = document.getElementById('memoryEntries');
+    const badge = document.getElementById('memoryTokenBadge');
+    const openBtn = document.getElementById('openMemoryWindowBtn');
+
+    latestMemorySnapshot = memorySnapshot || null;
+
+    if (!section || !summaryEl || !tokenUsageEl || !entriesContainer || !badge) {
+        return;
+    }
+
+    if (!memorySnapshot) {
+        section.style.display = 'none';
+        summaryEl.textContent = '尚無摘要資料。';
+        tokenUsageEl.textContent = 'Token 使用：0';
+        entriesContainer.innerHTML = '';
+        badge.textContent = '0';
+        if (openBtn) openBtn.style.display = 'none';
+        lastAutoOpenToken = 0;
+        updateProjectPanelVisibility();
+        return;
+    }
+
+    section.style.display = 'block';
+    summaryEl.textContent = memorySnapshot.short_term_summary || '尚無摘要資料。';
+    const threshold = memorySnapshot.token_threshold || memorySettings.token_threshold || 0;
+    const tokenUsageText = threshold
+        ? `Token 使用：${memorySnapshot.total_token_usage || 0} / ${threshold}`
+        : `Token 使用：${memorySnapshot.total_token_usage || 0}`;
+    tokenUsageEl.textContent = tokenUsageText;
+
+    entriesContainer.innerHTML = '';
+    if (memorySnapshot.long_term_memory && memorySnapshot.long_term_memory.length) {
+        memorySnapshot.long_term_memory.forEach(entry => {
+            entriesContainer.appendChild(renderMemoryEntry(entry));
+        });
+    } else {
+        const empty = document.createElement('div');
+        empty.className = 'memory-empty';
+        empty.textContent = '目前沒有長期記憶紀錄。';
+        entriesContainer.appendChild(empty);
+    }
+
+    badge.textContent = (memorySnapshot.long_term_memory?.length || 0).toString();
+
+    if (openBtn) {
+        openBtn.style.display = currentProjectDir ? 'inline-flex' : 'none';
+    }
+
+    updateProjectPanelVisibility();
+
+    if (threshold && memorySnapshot.total_token_usage >= threshold) {
+        if (memorySnapshot.total_token_usage > lastAutoOpenToken) {
+            lastAutoOpenToken = memorySnapshot.total_token_usage;
+            openMemoryWindow(true);
+        }
+    } else {
+        lastAutoOpenToken = Math.max(lastAutoOpenToken, memorySnapshot.total_token_usage || 0);
+    }
+}
+
+function openMemoryWindow(autoTrigger = false) {
+    if (!currentProjectDir) {
+        showNotification('請先選擇專案', 'warning');
+        return;
+    }
+
+    window.open(`/memory/${encodeURIComponent(currentProjectDir)}`, '_blank');
+    if (autoTrigger) {
+        showNotification('Token 達到閾值，已自動開啟記憶視窗。', 'info');
+    }
 }
 
 async function deleteProject(projectPath) {
@@ -831,7 +1125,11 @@ function resetToHome() {
     document.getElementById('resultsContainer').innerHTML = '';
     document.getElementById('projectStructureSection').style.display = 'none';
     document.getElementById('homeBtn').style.display = 'none';
-    
+    updateMemoryDisplay(null);
+    latestMemorySnapshot = null;
+    lastAutoOpenToken = 0;
+    lastUserMessageElement = null;
+
     document.querySelectorAll('.project-item').forEach(item => {
         item.classList.remove('active');
     });

@@ -17,6 +17,7 @@ import json
 import platform
 import logging
 import queue
+import uuid
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
 from pathlib import Path
@@ -144,6 +145,7 @@ class AIConfig:
     thinking_config: Dict[str, Any] = None
     safety_settings: Dict[str, str] = None
     automation_settings: Dict[str, Any] = None
+    memory_settings: Dict[str, Any] = None
 
     def __post_init__(self):
         if self.generation_params is None:
@@ -174,6 +176,11 @@ class AIConfig:
                 "auto_test": False,
                 "monitor_interval": 5
             }
+        if self.memory_settings is None:
+            self.memory_settings = {
+                "summary_message_limit": 6,
+                "token_threshold": 6000
+            }
 
 @dataclass
 class ConversationMessage:
@@ -187,6 +194,17 @@ class ConversationMessage:
     usage_metadata: Optional[Dict] = None  # ⭐ 新增：直接保存 token 統計
 
 @dataclass
+class LongTermMemoryEntry:
+    """長期記憶項目結構"""
+    id: str
+    topic: str
+    summary: str
+    keywords: List[str]
+    related_messages: List[str]
+    created_at: str
+    updated_at: str
+
+@dataclass
 class ProjectConversation:
     """專案對話歷史"""
     project_dir: str
@@ -194,6 +212,163 @@ class ProjectConversation:
     messages: List[ConversationMessage] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+    short_term_summary: str = ""
+    long_term_memory: List[LongTermMemoryEntry] = field(default_factory=list)
+    total_token_usage: int = 0
+    token_threshold: int = 6000
+    token_threshold_exceeded: bool = False
+
+# ============================================
+# 記憶體系統管理
+# ============================================
+
+class MemoryManager:
+    """長短期記憶計算工具"""
+
+    DEFAULT_SUMMARY_MESSAGES = 6
+    DEFAULT_TOKEN_THRESHOLD = 6000
+
+    @staticmethod
+    def _normalize_settings(memory_settings: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
+        settings = {
+            'summary_message_limit': MemoryManager.DEFAULT_SUMMARY_MESSAGES,
+            'token_threshold': MemoryManager.DEFAULT_TOKEN_THRESHOLD
+        }
+
+        if isinstance(memory_settings, dict):
+            if 'summary_message_limit' in memory_settings:
+                try:
+                    settings['summary_message_limit'] = max(2, int(memory_settings['summary_message_limit']))
+                except (TypeError, ValueError):
+                    pass
+            if 'token_threshold' in memory_settings:
+                try:
+                    settings['token_threshold'] = max(1000, int(memory_settings['token_threshold']))
+                except (TypeError, ValueError):
+                    pass
+
+        return settings
+
+    @staticmethod
+    def generate_short_term_summary(conversation: ProjectConversation, limit: int) -> str:
+        if not conversation.messages:
+            return "目前尚無摘要。"
+
+        recent_messages = conversation.messages[-limit:]
+        summary_lines = []
+
+        for msg in recent_messages:
+            role_label = '使用者' if msg.role == 'user' else 'AI'
+            content = (msg.content or '').strip().replace('\r', '')
+            content = re.sub(r'\s+', ' ', content)
+            if len(content) > 120:
+                content = content[:117] + '...'
+            summary_lines.append(f"{role_label}: {content}")
+
+        return "\n".join(summary_lines)
+
+    @staticmethod
+    def _extract_topic(content: str) -> str:
+        if not content:
+            return "一般需求"
+        first_line = content.strip().splitlines()[0]
+        first_line = re.sub(r'\s+', ' ', first_line)
+        if len(first_line) > 16:
+            first_line = first_line[:16] + '...'
+        return first_line or "一般需求"
+
+    @staticmethod
+    def _extract_keywords(text: str, limit: int = 5) -> List[str]:
+        if not text:
+            return []
+        tokens = re.findall(r'[\w\u4e00-\u9fa5]{2,}', text)
+        unique = []
+        for token in tokens:
+            normalized = token.strip().lower()
+            if normalized and normalized not in unique:
+                unique.append(normalized)
+            if len(unique) >= limit:
+                break
+        return unique
+
+    @staticmethod
+    def _create_memory_entry(user_msg: ConversationMessage, assistant_msg: ConversationMessage) -> LongTermMemoryEntry:
+        topic = MemoryManager._extract_topic(user_msg.content)
+        summary_parts = []
+
+        user_excerpt = (user_msg.content or '').strip().replace('\r', '')
+        assistant_excerpt = (assistant_msg.content or '').strip().replace('\r', '')
+
+        user_excerpt = re.sub(r'\s+', ' ', user_excerpt)
+        assistant_excerpt = re.sub(r'\s+', ' ', assistant_excerpt)
+
+        if len(user_excerpt) > 140:
+            user_excerpt = user_excerpt[:137] + '...'
+        if len(assistant_excerpt) > 140:
+            assistant_excerpt = assistant_excerpt[:137] + '...'
+
+        summary_parts.append(f"需求：{user_excerpt}")
+        summary_parts.append(f"回應：{assistant_excerpt}")
+
+        entry_id = uuid.uuid5(uuid.NAMESPACE_DNS, f"{user_msg.timestamp}-{assistant_msg.timestamp}-{topic}").hex
+        keywords = MemoryManager._extract_keywords(f"{user_msg.content} {assistant_msg.content}")
+
+        return LongTermMemoryEntry(
+            id=entry_id,
+            topic=topic,
+            summary="\n".join(summary_parts),
+            keywords=keywords,
+            related_messages=[user_msg.timestamp, assistant_msg.timestamp],
+            created_at=user_msg.timestamp,
+            updated_at=assistant_msg.timestamp
+        )
+
+    @staticmethod
+    def generate_long_term_memory(conversation: ProjectConversation) -> List[LongTermMemoryEntry]:
+        entries: Dict[str, LongTermMemoryEntry] = {}
+        pending_user: Optional[ConversationMessage] = None
+
+        for msg in conversation.messages:
+            if msg.role == 'user':
+                pending_user = msg
+            elif msg.role == 'assistant' and pending_user:
+                entry = MemoryManager._create_memory_entry(pending_user, msg)
+                entries[entry.id] = entry
+                pending_user = None
+
+        return list(entries.values())
+
+    @staticmethod
+    def calculate_total_tokens(conversation: ProjectConversation) -> int:
+        total = 0
+        for msg in conversation.messages:
+            if msg.usage_metadata and isinstance(msg.usage_metadata, dict):
+                total += int(msg.usage_metadata.get('total_token_count', 0) or 0)
+        return total
+
+    @staticmethod
+    def refresh_conversation(conversation: ProjectConversation, memory_settings: Optional[Dict[str, Any]] = None) -> ProjectConversation:
+        settings = MemoryManager._normalize_settings(memory_settings)
+        conversation.short_term_summary = MemoryManager.generate_short_term_summary(
+            conversation,
+            settings['summary_message_limit']
+        )
+        conversation.long_term_memory = MemoryManager.generate_long_term_memory(conversation)
+        conversation.total_token_usage = MemoryManager.calculate_total_tokens(conversation)
+        conversation.token_threshold = settings['token_threshold']
+        conversation.token_threshold_exceeded = conversation.total_token_usage >= conversation.token_threshold > 0
+        return conversation
+
+    @staticmethod
+    def build_payload(conversation: ProjectConversation) -> Dict[str, Any]:
+        return {
+            'project_name': conversation.project_name,
+            'short_term_summary': conversation.short_term_summary,
+            'long_term_memory': [asdict(entry) for entry in conversation.long_term_memory],
+            'total_token_usage': conversation.total_token_usage,
+            'token_threshold': conversation.token_threshold,
+            'token_threshold_exceeded': conversation.token_threshold_exceeded
+        }
 
 @dataclass
 class ProcessResult:
@@ -211,6 +386,7 @@ class ProcessResult:
     is_iteration: bool = False
     usage_metadata: Optional[Dict] = None
     terminal_output: str = ""
+    memory_snapshot: Optional[Dict[str, Any]] = None
 
 # ============================================
 # JSON Schema 定義 - 繁體中文化
@@ -429,7 +605,7 @@ class ConversationManager:
     def load_conversation(project_dir: str) -> ProjectConversation:
         """載入專案對話歷史 - 正確處理 usage_metadata"""
         conv_file = ConversationManager.get_conversation_file(project_dir)
-        
+
         if not conv_file.exists():
             project_name = Path(project_dir).name
             conv = ProjectConversation(
@@ -460,14 +636,38 @@ class ConversationManager:
                         terminal_output=msg_data.get('terminal_output'),
                         usage_metadata=usage_metadata  # ⭐ 直接保存
                     ))
-                
-                return ProjectConversation(
+
+                long_term_memory_data = data.get('long_term_memory', [])
+                long_term_memory: List[LongTermMemoryEntry] = []
+                for entry in long_term_memory_data:
+                    try:
+                        long_term_memory.append(LongTermMemoryEntry(
+                            id=entry.get('id', uuid.uuid4().hex),
+                            topic=entry.get('topic', '一般記錄'),
+                            summary=entry.get('summary', ''),
+                            keywords=entry.get('keywords', []),
+                            related_messages=entry.get('related_messages', []),
+                            created_at=entry.get('created_at', ''),
+                            updated_at=entry.get('updated_at', entry.get('created_at', ''))
+                        ))
+                    except Exception:
+                        continue
+
+                conversation = ProjectConversation(
                     project_dir=data['project_dir'],
                     project_name=data['project_name'],
                     messages=messages,
                     created_at=data.get('created_at', ''),
-                    updated_at=data.get('updated_at', '')
+                    updated_at=data.get('updated_at', ''),
+                    short_term_summary=data.get('short_term_summary', ''),
+                    long_term_memory=long_term_memory,
+                    total_token_usage=data.get('total_token_usage', 0),
+                    token_threshold=data.get('token_threshold', MemoryManager.DEFAULT_TOKEN_THRESHOLD),
+                    token_threshold_exceeded=data.get('token_threshold_exceeded', False)
                 )
+
+                MemoryManager.refresh_conversation(conversation)
+                return conversation
         except Exception as e:
             logger.error(f"載入對話歷史失敗: {e}")
             return ProjectConversation(
@@ -483,7 +683,7 @@ class ConversationManager:
         try:
             conv_file = ConversationManager.get_conversation_file(conversation.project_dir)
             conversation.updated_at = datetime.now().isoformat()
-            
+
             # ⭐ 關鍵修復：使用自定義序列化保留 usage_metadata
             messages_data = []
             for msg in conversation.messages:
@@ -497,31 +697,37 @@ class ConversationManager:
                     'usage_metadata': msg.usage_metadata  # ⭐ 直接保存
                 }
                 messages_data.append(msg_dict)
-            
+
             data = {
                 'project_dir': conversation.project_dir,
                 'project_name': conversation.project_name,
                 'messages': messages_data,
                 'created_at': conversation.created_at,
-                'updated_at': conversation.updated_at
+                'updated_at': conversation.updated_at,
+                'short_term_summary': conversation.short_term_summary,
+                'long_term_memory': [asdict(entry) for entry in conversation.long_term_memory],
+                'total_token_usage': conversation.total_token_usage,
+                'token_threshold': conversation.token_threshold,
+                'token_threshold_exceeded': conversation.token_threshold_exceeded
             }
-            
+
             with open(conv_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-            
+
             logger.info(f"對話歷史已儲存: {conversation.project_name}")
             return True
         except Exception as e:
             logger.error(f"儲存對話歷史失敗: {e}")
             return False
-    
+
     @staticmethod
-    def add_message(project_dir: str, role: str, content: str, files: Optional[List[Dict]] = None, 
+    def add_message(project_dir: str, role: str, content: str, files: Optional[List[Dict]] = None,
                    metadata: Optional[Dict] = None, terminal_output: Optional[str] = None,
-                   usage_metadata: Optional[Dict] = None):  # ⭐ 新增參數
+                   usage_metadata: Optional[Dict] = None,
+                   memory_settings: Optional[Dict[str, Any]] = None) -> ProjectConversation:  # ⭐ 新增參數
         """添加消息到對話歷史 - 支持 usage_metadata"""
         conversation = ConversationManager.load_conversation(project_dir)
-        
+
         message = ConversationMessage(
             role=role,
             content=content,
@@ -531,9 +737,11 @@ class ConversationManager:
             terminal_output=terminal_output,
             usage_metadata=usage_metadata  # ⭐ 直接保存
         )
-        
+
         conversation.messages.append(message)
+        MemoryManager.refresh_conversation(conversation, memory_settings)
         ConversationManager.save_conversation(conversation)
+        return conversation
     
     @staticmethod
     def delete_conversation_file(project_dir: str) -> bool:
@@ -1690,7 +1898,8 @@ class ProcessManager:
                 'user',
                 prompt,
                 files=[{'name': f.get('name'), 'type': f.get('type')} for f in (files or [])],
-                terminal_output=terminal_output
+                terminal_output=terminal_output,
+                memory_settings=config.memory_settings
             )
             
             if is_iteration and attach_screenshot:
@@ -2049,7 +2258,7 @@ class ProcessManager:
             result.success = True
             
             # ⭐ 關鍵修復:使用最終路徑和正確的 usage_metadata 保存AI回應
-            ConversationManager.add_message(
+            final_conversation = ConversationManager.add_message(
                 final_project_dir,  # ✅ 使用最終專案路徑
                 'assistant',
                 result.output,
@@ -2058,26 +2267,31 @@ class ProcessManager:
                     'files_count': len(project.files)
                 },
                 terminal_output=result.terminal_output,
-                usage_metadata=usage_metadata  # ⭐ 直接傳遞 usage_metadata
+                usage_metadata=usage_metadata,  # ⭐ 直接傳遞 usage_metadata
+                memory_settings=config.memory_settings
             )
-            
+
+            result.memory_snapshot = MemoryManager.build_payload(final_conversation)
+
         except Exception as e:
             result.error = str(e)
             logger.error(f"處理流程失敗: {e}")
             import traceback
             logger.error(traceback.format_exc())
-            
+
             if not result.ai_response:
                 result.ai_response = "無法獲取 AI 回應"
-            
+
             # 錯誤情況下也保存消息
-            ConversationManager.add_message(
+            error_conversation = ConversationManager.add_message(
                 folder_path,
                 'assistant',
                 f"執行失敗: {result.error}",
-                metadata={'error': True, 'error_type': 'execution_error'}
+                metadata={'error': True, 'error_type': 'execution_error'},
+                memory_settings=config.memory_settings
             )
-        
+            result.memory_snapshot = MemoryManager.build_payload(error_conversation)
+
         return result
 
 # ============================================
@@ -2189,7 +2403,8 @@ def load_project():
             'conversation': {
                 'messages': messages_data,
                 'created_at': conversation.created_at,
-                'updated_at': conversation.updated_at
+                'updated_at': conversation.updated_at,
+                'memory_snapshot': MemoryManager.build_payload(conversation)
             }
         })
         
@@ -2229,7 +2444,8 @@ def get_conversation(project_dir):
                 'project_name': conversation.project_name,
                 'messages': messages_data,
                 'created_at': conversation.created_at,
-                'updated_at': conversation.updated_at
+                'updated_at': conversation.updated_at,
+                'memory_snapshot': MemoryManager.build_payload(conversation)
             }
         })
     except Exception as e:
@@ -2238,6 +2454,37 @@ def get_conversation(project_dir):
             'success': False,
             'error': str(e)
         }), 500
+
+@app.route('/memory/<path:project_dir>', methods=['GET'])
+def show_memory(project_dir):
+    """顯示專案的長短期記憶視圖"""
+    try:
+        conversation = ConversationManager.load_conversation(project_dir)
+        memory_payload = MemoryManager.build_payload(conversation)
+        return render_template(
+            'memory.html',
+            project_name=conversation.project_name,
+            project_dir=project_dir,
+            memory=memory_payload,
+            error=None
+        )
+    except Exception as e:
+        logger.error(f"顯示記憶視窗失敗: {e}")
+        fallback_memory = {
+            'project_name': '未知專案',
+            'short_term_summary': '無法載入記憶資料。',
+            'long_term_memory': [],
+            'total_token_usage': 0,
+            'token_threshold': MemoryManager.DEFAULT_TOKEN_THRESHOLD,
+            'token_threshold_exceeded': False
+        }
+        return render_template(
+            'memory.html',
+            project_name='錯誤',
+            project_dir=project_dir,
+            memory=fallback_memory,
+            error=str(e)
+        ), 500
 
 @app.route('/api/projects', methods=['GET'])
 def get_projects():
@@ -2324,7 +2571,8 @@ def run_process():
             'screenshots': result.screenshots,
             'is_iteration': result.is_iteration,
             'usage_metadata': result.usage_metadata,
-            'terminal_output': result.terminal_output
+            'terminal_output': result.terminal_output,
+            'memory_snapshot': result.memory_snapshot
         }
         
         if result.project_data:

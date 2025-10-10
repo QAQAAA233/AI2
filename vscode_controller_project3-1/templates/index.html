@@ -146,7 +146,32 @@
                         </div>
                         <div id="attachedFilesList" class="panel-file-list"></div>
                     </div>
-                    
+
+                    <div id="memoryPanelSection" style="display: none;">
+                        <div class="panel-section-title">
+                            <span>長短期記憶</span>
+                            <span id="memoryTokenBadge" class="count-badge">0</span>
+                        </div>
+                        <div class="memory-summary-card">
+                            <div class="memory-summary-header">
+                                <span class="memory-summary-title">短期摘要</span>
+                                <button id="openMemoryWindowBtn" class="open-memory-btn" type="button" onclick="openMemoryWindow()" style="display: none;">
+                                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M4 4h7M4 4v7M20 20h-7M20 20v-7"/>
+                                        <path d="M14 4h6v6"/>
+                                        <path d="M10 20H4v-6"/>
+                                    </svg>
+                                    <span>記憶視窗</span>
+                                </button>
+                            </div>
+                            <div id="memorySummaryText" class="memory-summary-body">尚無摘要資料。</div>
+                        </div>
+                        <div class="memory-meta-row">
+                            <span id="memoryTokenUsage" class="memory-token-usage">Token 使用：0</span>
+                        </div>
+                        <div id="memoryEntries" class="memory-entries-list"></div>
+                    </div>
+
                     <div id="panelEmptyState" class="panel-empty">
                         <svg class="icon-large" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>

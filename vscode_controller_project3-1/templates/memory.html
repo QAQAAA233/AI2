@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ project_name }} - 記憶視窗</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+    <style>
+        body.memory-page {
+            background: var(--bg-secondary);
+            padding: 32px 16px;
+            overflow-y: auto;
+        }
+        .memory-container {
+            max-width: 960px;
+            margin: 0 auto;
+            background: var(--bg-primary);
+            border-radius: 16px;
+            box-shadow: var(--shadow-lg);
+            border: 1px solid var(--border-light);
+            padding: 28px;
+        }
+        .memory-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+        .memory-header h1 {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+        .memory-header small {
+            font-size: 12px;
+            color: var(--text-tertiary);
+        }
+        .memory-summary-section {
+            border-radius: 14px;
+            border: 1px solid var(--border-light);
+            padding: 20px;
+            background: var(--bg-secondary);
+            margin-bottom: 24px;
+        }
+        .memory-summary-section h2 {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 12px;
+        }
+        .memory-summary-text {
+            font-size: 14px;
+            line-height: 1.7;
+            color: var(--text-secondary);
+            white-space: pre-wrap;
+        }
+        .memory-summary-meta {
+            margin-top: 16px;
+            font-size: 12px;
+            color: var(--text-tertiary);
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        .memory-entries-section h2 {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 16px;
+        }
+        .memory-entry-card {
+            border: 1px solid var(--border-light);
+            border-radius: 12px;
+            padding: 18px;
+            background: var(--bg-primary);
+            margin-bottom: 16px;
+            box-shadow: var(--shadow-sm);
+        }
+        .memory-entry-card h3 {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        .memory-entry-meta {
+            font-size: 12px;
+            color: var(--text-tertiary);
+            margin-bottom: 12px;
+        }
+        .memory-entry-summary {
+            font-size: 13px;
+            line-height: 1.6;
+            color: var(--text-secondary);
+            white-space: pre-wrap;
+        }
+        .memory-keywords {
+            margin-top: 12px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .memory-keyword {
+            padding: 4px 10px;
+            border-radius: 999px;
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+            font-size: 12px;
+        }
+        .memory-empty-state {
+            padding: 20px;
+            border-radius: 12px;
+            border: 1px dashed var(--border-color);
+            background: var(--bg-secondary);
+            text-align: center;
+            color: var(--text-tertiary);
+        }
+        .memory-error {
+            padding: 16px;
+            border-radius: 12px;
+            border: 1px solid #f97316;
+            background: rgba(249, 115, 22, 0.08);
+            color: #b45309;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body class="memory-page">
+    <div class="memory-container">
+        <header class="memory-header">
+            <div>
+                <h1>{{ project_name }} - 長短期記憶</h1>
+                <small>總 Token 使用：{{ memory.total_token_usage }} / 閾值 {{ memory.token_threshold }}</small>
+            </div>
+            <small>資料刷新時間：{{ memory.long_term_memory[0].updated_at if memory.long_term_memory else '' }}</small>
+        </header>
+
+        {% if error %}
+        <div class="memory-error">{{ error }}</div>
+        {% endif %}
+
+        <section class="memory-summary-section">
+            <h2>短期摘要</h2>
+            <div class="memory-summary-text">{{ memory.short_term_summary or '尚無摘要資料。' }}</div>
+            <div class="memory-summary-meta">
+                <span>Token 閾值：{{ memory.token_threshold }}</span>
+                <span>是否超過閾值：{{ '是' if memory.token_threshold_exceeded else '否' }}</span>
+            </div>
+        </section>
+
+        <section class="memory-entries-section">
+            <h2>長期記憶</h2>
+            {% if memory.long_term_memory %}
+                {% for entry in memory.long_term_memory %}
+                    <article class="memory-entry-card">
+                        <h3>{{ entry.topic }}</h3>
+                        <div class="memory-entry-meta">
+                            更新時間：{{ entry.updated_at or entry.created_at }} ｜ 相關訊息：{{ entry.related_messages|length }} 筆
+                        </div>
+                        <div class="memory-entry-summary">{{ entry.summary }}</div>
+                        {% if entry.keywords %}
+                        <div class="memory-keywords">
+                            {% for keyword in entry.keywords %}
+                                <span class="memory-keyword">{{ keyword }}</span>
+                            {% endfor %}
+                        </div>
+                        {% endif %}
+                    </article>
+                {% endfor %}
+            {% else %}
+                <div class="memory-empty-state">目前沒有長期記憶紀錄。</div>
+            {% endif %}
+        </section>
+    </div>
+</body>
+</html>
