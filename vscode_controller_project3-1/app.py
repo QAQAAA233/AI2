@@ -71,6 +71,20 @@ PROJECTS_DIR = CONFIG_DIR / 'projects'
 CONVERSATIONS_DIR = CONFIG_DIR / 'conversations'
 PROJECT_LIST_FILE = CONFIG_DIR / 'project_list.json'
 
+# ============================================
+# 公用函式
+# ============================================
+
+def default_memory_state() -> Dict[str, Any]:
+    """建立預設的記憶狀態結構"""
+    return {
+        'project_summary': '',
+        'long_term_notes': [],
+        'last_goals': [],
+        'last_improvement': '',
+        'last_snapshot': None
+    }
+
 # 確保所有目錄都存在，並處理錯誤
 def ensure_directories():
     """確保所有必要的目錄都存在"""
@@ -185,6 +199,7 @@ class ConversationMessage:
     metadata: Optional[Dict] = None
     terminal_output: Optional[str] = None
     usage_metadata: Optional[Dict] = None  # ⭐ 新增：直接保存 token 統計
+    analysis_packet: Optional[Dict] = None  # ⭐ 新增：保存長短期記憶與評分資料
 
 @dataclass
 class ProjectConversation:
@@ -194,6 +209,7 @@ class ProjectConversation:
     messages: List[ConversationMessage] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+    memory_state: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class ProcessResult:
@@ -211,6 +227,7 @@ class ProcessResult:
     is_iteration: bool = False
     usage_metadata: Optional[Dict] = None
     terminal_output: str = ""
+    analysis_packet: Optional[Dict] = None
 
 # ============================================
 # JSON Schema 定義 - 繁體中文化
@@ -429,17 +446,18 @@ class ConversationManager:
     def load_conversation(project_dir: str) -> ProjectConversation:
         """載入專案對話歷史 - 正確處理 usage_metadata"""
         conv_file = ConversationManager.get_conversation_file(project_dir)
-        
+
         if not conv_file.exists():
             project_name = Path(project_dir).name
             conv = ProjectConversation(
                 project_dir=project_dir,
                 project_name=project_name,
                 created_at=datetime.now().isoformat(),
-                updated_at=datetime.now().isoformat()
+                updated_at=datetime.now().isoformat(),
+                memory_state=default_memory_state()
             )
             return conv
-        
+
         try:
             with open(conv_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -450,7 +468,7 @@ class ConversationManager:
                     if not usage_metadata and msg_data.get('metadata'):
                         # 向後兼容：從 metadata 中提取 usage_metadata
                         usage_metadata = msg_data['metadata'].get('usage_metadata')
-                    
+
                     messages.append(ConversationMessage(
                         role=msg_data['role'],
                         content=msg_data['content'],
@@ -458,15 +476,17 @@ class ConversationManager:
                         files=msg_data.get('files'),
                         metadata=msg_data.get('metadata'),
                         terminal_output=msg_data.get('terminal_output'),
-                        usage_metadata=usage_metadata  # ⭐ 直接保存
+                        usage_metadata=usage_metadata,  # ⭐ 直接保存
+                        analysis_packet=msg_data.get('analysis_packet')
                     ))
-                
+
                 return ProjectConversation(
                     project_dir=data['project_dir'],
                     project_name=data['project_name'],
                     messages=messages,
                     created_at=data.get('created_at', ''),
-                    updated_at=data.get('updated_at', '')
+                    updated_at=data.get('updated_at', ''),
+                    memory_state=data.get('memory_state', default_memory_state())
                 )
         except Exception as e:
             logger.error(f"載入對話歷史失敗: {e}")
@@ -474,7 +494,8 @@ class ConversationManager:
                 project_dir=project_dir,
                 project_name=Path(project_dir).name,
                 created_at=datetime.now().isoformat(),
-                updated_at=datetime.now().isoformat()
+                updated_at=datetime.now().isoformat(),
+                memory_state=default_memory_state()
             )
     
     @staticmethod
@@ -494,34 +515,37 @@ class ConversationManager:
                     'files': msg.files,
                     'metadata': msg.metadata,
                     'terminal_output': msg.terminal_output,
-                    'usage_metadata': msg.usage_metadata  # ⭐ 直接保存
+                    'usage_metadata': msg.usage_metadata,
+                    'analysis_packet': msg.analysis_packet
                 }
                 messages_data.append(msg_dict)
-            
+
             data = {
                 'project_dir': conversation.project_dir,
                 'project_name': conversation.project_name,
                 'messages': messages_data,
                 'created_at': conversation.created_at,
-                'updated_at': conversation.updated_at
+                'updated_at': conversation.updated_at,
+                'memory_state': conversation.memory_state or default_memory_state()
             }
-            
+
             with open(conv_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-            
+
             logger.info(f"對話歷史已儲存: {conversation.project_name}")
             return True
         except Exception as e:
             logger.error(f"儲存對話歷史失敗: {e}")
             return False
-    
+
     @staticmethod
-    def add_message(project_dir: str, role: str, content: str, files: Optional[List[Dict]] = None, 
+    def add_message(project_dir: str, role: str, content: str, files: Optional[List[Dict]] = None,
                    metadata: Optional[Dict] = None, terminal_output: Optional[str] = None,
-                   usage_metadata: Optional[Dict] = None):  # ⭐ 新增參數
+                   usage_metadata: Optional[Dict] = None, analysis_packet: Optional[Dict] = None,
+                   memory_state: Optional[Dict] = None):  # ⭐ 新增參數
         """添加消息到對話歷史 - 支持 usage_metadata"""
         conversation = ConversationManager.load_conversation(project_dir)
-        
+
         message = ConversationMessage(
             role=role,
             content=content,
@@ -529,10 +553,13 @@ class ConversationManager:
             files=files,
             metadata=metadata,
             terminal_output=terminal_output,
-            usage_metadata=usage_metadata  # ⭐ 直接保存
+            usage_metadata=usage_metadata,
+            analysis_packet=analysis_packet
         )
-        
+
         conversation.messages.append(message)
+        if memory_state is not None:
+            conversation.memory_state = memory_state
         ConversationManager.save_conversation(conversation)
     
     @staticmethod
@@ -674,15 +701,199 @@ class ProjectManager:
         try:
             project_list = ProjectManager.get_project_list()
             project_list = [p for p in project_list if p['path'] != project_dir]
-            
+
             with open(PROJECT_LIST_FILE, 'w', encoding='utf-8') as f:
                 json.dump(project_list, f, indent=2, ensure_ascii=False)
-            
+
             logger.info(f"已從列表移除專案: {project_dir}")
             return True
         except Exception as e:
             logger.error(f"移除專案失敗: {e}")
             return False
+
+# ============================================
+# 長短期記憶與評分系統
+# ============================================
+
+class MemorySystem:
+    """長短期記憶與評分改進系統"""
+
+    @staticmethod
+    def _truncate(text: Optional[str], limit: int = 120) -> str:
+        if not text:
+            return ""
+        cleaned = str(text).strip().replace('\r\n', '\n')
+        if len(cleaned) <= limit:
+            return cleaned
+        return cleaned[:limit].rstrip() + "…"
+
+    @staticmethod
+    def _resolve_summary(state: Dict[str, Any], project: Optional[ProjectOutput], conversation: ProjectConversation) -> str:
+        if project and project.description:
+            return project.description
+        if state.get('project_summary'):
+            return state['project_summary']
+
+        for message in reversed(conversation.messages):
+            if message.role == 'assistant' and message.content:
+                return MemorySystem._truncate(message.content, 160)
+        return "尚未建立專案摘要，待後續回應補充。"
+
+    @staticmethod
+    def _build_short_term(state: Dict[str, Any], conversation: ProjectConversation,
+                          user_prompt: str, process_result: ProcessResult) -> str:
+        recent_users = [msg.content for msg in conversation.messages if msg.role == 'user']
+        if user_prompt:
+            recent_users.append(user_prompt)
+        recent_users = [MemorySystem._truncate(msg, 60) for msg in recent_users[-2:] if msg]
+        user_section = " / ".join(recent_users) if recent_users else "無使用者輸入紀錄"
+
+        output_summary = MemorySystem._truncate(process_result.output, 120) or "尚無回應摘要"
+
+        short_term = f"最近需求：{user_section}；AI 回應重點：{output_summary}。"
+        last_improvement = state.get('last_improvement')
+        if last_improvement:
+            short_term += f" 上輪建議回顧：{MemorySystem._truncate(last_improvement, 80)}。"
+        return short_term
+
+    @staticmethod
+    def _build_long_term_notes(state: Dict[str, Any], process_result: ProcessResult,
+                               project: Optional[ProjectOutput]) -> List[str]:
+        notes = list(state.get('long_term_notes') or [])
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
+        status_text = "成功" if process_result.success else "待改善"
+        created_count = len(process_result.files_created or [])
+        updated_count = len(process_result.files_updated or [])
+
+        if project:
+            project_name = project.project_name
+        else:
+            project_name = state.get('project_summary') or "專案"
+
+        summary_piece = f"{timestamp}：{project_name} {status_text}；新增 {created_count} 檔、更新 {updated_count} 檔"
+        if process_result.error:
+            summary_piece += f"；錯誤：{MemorySystem._truncate(process_result.error, 60)}"
+
+        if summary_piece not in notes:
+            notes.append(summary_piece)
+
+        return notes[-5:]
+
+    @staticmethod
+    def _evaluate_process(process_result: ProcessResult) -> Tuple[int, str, str, str]:
+        base_score = 88 if process_result.success else 58
+        deductions = []
+
+        if process_result.error:
+            deductions.append(MemorySystem._truncate(process_result.error, 80))
+            base_score -= 18
+
+        if process_result.installation_logs:
+            has_warning = any('error' in log.lower() or 'fail' in log.lower() for log in process_result.installation_logs)
+            if has_warning:
+                deductions.append('套件安裝輸出出現警告或錯誤')
+                base_score -= 6
+
+        if (process_result.files_created or process_result.files_updated) and process_result.success:
+            base_score += 4
+
+        score = max(0, min(100, base_score))
+
+        created_count = len(process_result.files_created or [])
+        updated_count = len(process_result.files_updated or [])
+        review = (
+            f"本輪回應{'成功完成' if process_result.success else '尚待完成'}，"
+            f"新增 {created_count} 個檔案、更新 {updated_count} 個檔案，"
+            f"輸出長度約 {len(process_result.output or '')} 字元。"
+        )
+        review = MemorySystem._truncate(review, 200)
+
+        if not process_result.success:
+            improvement = "請優先依照錯誤訊息檢查流程，確認必要的 JSON 結構與程式碼生成是否完整。"
+        elif process_result.installation_logs and deductions:
+            improvement = "建議檢視套件安裝日誌，排除可能的依賴性問題後再重新執行。"
+        else:
+            improvement = "維持目前的開發節奏，並檢查前端記憶面板呈現是否符合需求。"
+
+        deduction_reason = "；".join(deductions) if deductions else "無"
+
+        return score, review, deduction_reason, improvement
+
+    @staticmethod
+    def _prepare_goals(state: Dict[str, Any], success: bool) -> List[Dict[str, Any]]:
+        previous = state.get('last_goals') or []
+        goals_map = {goal.get('步驟'): goal for goal in previous if isinstance(goal, dict)}
+
+        def ensure_goal(step: int, task: str, status: str) -> Dict[str, Any]:
+            goal = goals_map.get(step, {'步驟': step, '任務': task, '狀態': status, '是否為當前任務': False})
+            goal['任務'] = task
+            if '狀態' not in goal:
+                goal['狀態'] = status
+            if '是否為當前任務' not in goal:
+                goal['是否為當前任務'] = False
+            return goal
+
+        goal1 = ensure_goal(1, "蒐集並統整使用者需求與專案上下文", '已完成')
+        goal1['狀態'] = '已完成'
+        goal1['是否為當前任務'] = False
+
+        goal2 = ensure_goal(2, "更新後端長短期記憶與評分資料結構", '進行中')
+        if success:
+            goal2['狀態'] = '已完成'
+            goal2['是否為當前任務'] = False
+        else:
+            goal2['狀態'] = '進行中'
+            goal2['是否為當前任務'] = True
+
+        goal3 = ensure_goal(3, "渲染前端記憶展示面板並同步歷史紀錄", '未開始')
+        if success:
+            goal3['狀態'] = '進行中'
+            goal3['是否為當前任務'] = True
+        else:
+            goal3['狀態'] = '未開始'
+            goal3['是否為當前任務'] = False
+
+        goal4 = ensure_goal(4, "根據評分結果持續調整改進建議與互動體驗", '未開始')
+        goal4['狀態'] = '未開始'
+        goal4['是否為當前任務'] = False
+
+        return [goal1, goal2, goal3, goal4]
+
+    @staticmethod
+    def generate_packet(conversation: ProjectConversation, user_prompt: str,
+                        process_result: ProcessResult, project: Optional[ProjectOutput] = None) -> Tuple[Dict, Dict]:
+        state = conversation.memory_state or default_memory_state()
+
+        summary = MemorySystem._resolve_summary(state, project, conversation)
+        short_term = MemorySystem._build_short_term(state, conversation, user_prompt, process_result)
+        long_term_notes = MemorySystem._build_long_term_notes(state, process_result, project)
+        score, review, deduction_reason, improvement = MemorySystem._evaluate_process(process_result)
+        goals = MemorySystem._prepare_goals(state, process_result.success)
+
+        long_term_text = "；".join(long_term_notes) if long_term_notes else "尚無長期記憶紀錄。"
+
+        packet = {
+            "評分": score,
+            "內容評價": review,
+            "扣分原因": deduction_reason,
+            "改進建議": improvement,
+            "核心記憶模塊": {
+                "專案總結": summary,
+                "短期記憶 (STM)": short_term,
+                "長期記憶 (LTM)": long_term_text,
+                "專案目標": goals
+            }
+        }
+
+        new_state = {
+            'project_summary': summary,
+            'long_term_notes': long_term_notes,
+            'last_goals': goals,
+            'last_improvement': improvement,
+            'last_snapshot': packet
+        }
+
+        return packet, new_state
 
 # ============================================
 # Gemini AI 模塊
@@ -1819,14 +2030,26 @@ class ProcessManager:
                 if "```" in ai_response:
                     result.output += "\n=== 🔍 檢測到程式碼區塊 ===\n您可以手動複製下方 AI 回應中的程式碼。"
                 
-                # ⭐ 修復:使用正確的路徑保存錯誤消息
+                conversation = ConversationManager.load_conversation(folder_path)
+                analysis_packet, memory_state = MemorySystem.generate_packet(
+                    conversation,
+                    prompt,
+                    result,
+                    None
+                )
+
                 ConversationManager.add_message(
                     folder_path,
                     'assistant',
                     result.output,
-                    metadata={'error': True, 'error_type': 'parse_error'}
+                    metadata={'error': True, 'error_type': 'parse_error'},
+                    usage_metadata=result.usage_metadata,
+                    analysis_packet=analysis_packet,
+                    memory_state=memory_state
                 )
-                
+
+                result.analysis_packet = analysis_packet
+
                 return result
             
             if is_iteration:
@@ -2047,20 +2270,36 @@ class ProcessManager:
 """
             
             result.success = True
-            
+
+            conversation = ConversationManager.load_conversation(final_project_dir)
+            analysis_packet, memory_state = MemorySystem.generate_packet(
+                conversation,
+                prompt,
+                result,
+                project
+            )
+
+            metadata = {
+                'project_name': project.project_name,
+                'files_count': len(project.files),
+                'files_created': saved_files,
+                'files_updated': updated_files
+            }
+
             # ⭐ 關鍵修復:使用最終路徑和正確的 usage_metadata 保存AI回應
             ConversationManager.add_message(
                 final_project_dir,  # ✅ 使用最終專案路徑
                 'assistant',
                 result.output,
-                metadata={
-                    'project_name': project.project_name,
-                    'files_count': len(project.files)
-                },
+                metadata=metadata,
                 terminal_output=result.terminal_output,
-                usage_metadata=usage_metadata  # ⭐ 直接傳遞 usage_metadata
+                usage_metadata=usage_metadata,  # ⭐ 直接傳遞 usage_metadata
+                analysis_packet=analysis_packet,
+                memory_state=memory_state
             )
-            
+
+            result.analysis_packet = analysis_packet
+
         except Exception as e:
             result.error = str(e)
             logger.error(f"處理流程失敗: {e}")
@@ -2071,13 +2310,26 @@ class ProcessManager:
                 result.ai_response = "無法獲取 AI 回應"
             
             # 錯誤情況下也保存消息
+            conversation = ConversationManager.load_conversation(folder_path)
+            analysis_packet, memory_state = MemorySystem.generate_packet(
+                conversation,
+                prompt,
+                result,
+                None
+            )
+
             ConversationManager.add_message(
                 folder_path,
                 'assistant',
                 f"執行失敗: {result.error}",
-                metadata={'error': True, 'error_type': 'execution_error'}
+                metadata={'error': True, 'error_type': 'execution_error'},
+                usage_metadata=result.usage_metadata,
+                analysis_packet=analysis_packet,
+                memory_state=memory_state
             )
-        
+
+            result.analysis_packet = analysis_packet
+
         return result
 
 # ============================================
@@ -2176,10 +2428,11 @@ def load_project():
                 'files': msg.files,
                 'metadata': msg.metadata,
                 'terminal_output': msg.terminal_output,
-                'usage_metadata': msg.usage_metadata  # ⭐ 直接傳遞
+                'usage_metadata': msg.usage_metadata,
+                'analysis_packet': msg.analysis_packet  # ⭐ 直接傳遞
             }
             messages_data.append(msg_dict)
-        
+
         return jsonify({
             'success': True,
             'project_info': project_info,
@@ -2189,7 +2442,8 @@ def load_project():
             'conversation': {
                 'messages': messages_data,
                 'created_at': conversation.created_at,
-                'updated_at': conversation.updated_at
+                'updated_at': conversation.updated_at,
+                'memory_state': conversation.memory_state
             }
         })
         
@@ -2219,17 +2473,19 @@ def get_conversation(project_dir):
                 'files': msg.files,
                 'metadata': msg.metadata,
                 'terminal_output': msg.terminal_output,
-                'usage_metadata': msg.usage_metadata
+                'usage_metadata': msg.usage_metadata,
+                'analysis_packet': msg.analysis_packet
             }
             messages_data.append(msg_dict)
-        
+
         return jsonify({
             'success': True,
             'conversation': {
                 'project_name': conversation.project_name,
                 'messages': messages_data,
                 'created_at': conversation.created_at,
-                'updated_at': conversation.updated_at
+                'updated_at': conversation.updated_at,
+                'memory_state': conversation.memory_state
             }
         })
     except Exception as e:
@@ -2324,7 +2580,8 @@ def run_process():
             'screenshots': result.screenshots,
             'is_iteration': result.is_iteration,
             'usage_metadata': result.usage_metadata,
-            'terminal_output': result.terminal_output
+            'terminal_output': result.terminal_output,
+            'analysis_packet': result.analysis_packet
         }
         
         if result.project_data:

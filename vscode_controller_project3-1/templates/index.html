@@ -156,30 +156,83 @@
                 </div>
             </div>
 
-            <div class="empty-state" id="emptyState">
-                <h1 class="empty-title">選擇或創建一個專案開始工作</h1>
+            <div class="conversation-layout">
+                <div class="conversation-main">
+                    <div class="empty-state" id="emptyState">
+                        <h1 class="empty-title">選擇或創建一個專案開始工作</h1>
 
-                <div class="suggestions-grid">
-                    <div class="suggestion-card" onclick="useSuggestion('創建一個待辦事項應用，使用 Flask 後端和現代化的前端界面')">
-                        <div class="suggestion-title">待辦事項應用</div>
-                        <div class="suggestion-desc">創建一個功能完整的待辦清單應用</div>
+                        <div class="suggestions-grid">
+                            <div class="suggestion-card" onclick="useSuggestion('創建一個待辦事項應用，使用 Flask 後端和現代化的前端界面')">
+                                <div class="suggestion-title">待辦事項應用</div>
+                                <div class="suggestion-desc">創建一個功能完整的待辦清單應用</div>
+                            </div>
+                            <div class="suggestion-card" onclick="useSuggestion('生成一個幾何藝術生成器，使用 Python 和 Tkinter')">
+                                <div class="suggestion-title">幾何藝術生成器</div>
+                                <div class="suggestion-desc">創建隨機幾何圖案的藝術程式</div>
+                            </div>
+                            <div class="suggestion-card" onclick="useSuggestion('開發一個簡單的聊天應用，支持多用戶即時通訊')">
+                                <div class="suggestion-title">即時聊天應用</div>
+                                <div class="suggestion-desc">使用 WebSocket 的聊天室</div>
+                            </div>
+                            <div class="suggestion-card" onclick="useSuggestion('創建一個資料視覺化儀表板，展示圖表和統計資料')">
+                                <div class="suggestion-title">資料儀表板</div>
+                                <div class="suggestion-desc">互動式資料分析和視覺化</div>
+                            </div>
+                        </div>
                     </div>
-                    <div class="suggestion-card" onclick="useSuggestion('生成一個幾何藝術生成器，使用 Python 和 Tkinter')">
-                        <div class="suggestion-title">幾何藝術生成器</div>
-                        <div class="suggestion-desc">創建隨機幾何圖案的藝術程式</div>
+
+                    <div class="results-container" id="resultsContainer" style="display: none;"></div>
+                </div>
+
+                <div class="memory-panel" id="memoryPanel">
+                    <div class="memory-panel-header">
+                        <div class="memory-panel-heading">
+                            <span class="memory-panel-title">長短期記憶 / 評分</span>
+                            <span class="memory-panel-subtitle" id="memoryPanelSubtitle">尚未產生記憶紀錄</span>
+                        </div>
+                        <button class="memory-collapse-btn" type="button" onclick="toggleMemoryPanelCollapse()">
+                            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" id="memoryPanelToggleIcon">
+                                <path d="M6 9l6 6 6-6"/>
+                            </svg>
+                        </button>
                     </div>
-                    <div class="suggestion-card" onclick="useSuggestion('開發一個簡單的聊天應用，支持多用戶即時通訊')">
-                        <div class="suggestion-title">即時聊天應用</div>
-                        <div class="suggestion-desc">使用 WebSocket 的聊天室</div>
-                    </div>
-                    <div class="suggestion-card" onclick="useSuggestion('創建一個資料視覺化儀表板，展示圖表和統計資料')">
-                        <div class="suggestion-title">資料儀表板</div>
-                        <div class="suggestion-desc">互動式資料分析和視覺化</div>
+                    <div class="memory-panel-body" id="memoryPanelBody">
+                        <div class="memory-empty" id="memoryEmptyState">尚未產生記憶資料，請先執行專案。</div>
+                        <div class="memory-score-box">
+                            <div class="memory-score-value" id="memoryScore">--</div>
+                            <div class="memory-score-label">評分</div>
+                        </div>
+                        <div class="memory-section">
+                            <div class="memory-section-title">內容評價</div>
+                            <div class="memory-section-text" id="memoryReview"></div>
+                        </div>
+                        <div class="memory-section">
+                            <div class="memory-section-title">扣分原因</div>
+                            <div class="memory-section-text" id="memoryDeduction"></div>
+                        </div>
+                        <div class="memory-section">
+                            <div class="memory-section-title">改進建議</div>
+                            <div class="memory-section-text" id="memorySuggestion"></div>
+                        </div>
+                        <div class="memory-section">
+                            <div class="memory-subtitle">專案總結</div>
+                            <div class="memory-section-text" id="memorySummary"></div>
+                        </div>
+                        <div class="memory-section">
+                            <div class="memory-subtitle">短期記憶</div>
+                            <div class="memory-section-text" id="memorySTM"></div>
+                        </div>
+                        <div class="memory-section">
+                            <div class="memory-subtitle">長期記憶</div>
+                            <div class="memory-section-text" id="memoryLTM"></div>
+                        </div>
+                        <div class="memory-section">
+                            <div class="memory-subtitle">專案目標</div>
+                            <div class="memory-goals" id="memoryGoals"></div>
+                        </div>
                     </div>
                 </div>
             </div>
-
-            <div class="results-container" id="resultsContainer" style="display: none;"></div>
         </div>
 
         <div class="input-area">
@@ -216,6 +269,16 @@
                                     <line x1="12" y1="19" x2="20" y2="19"/>
                                 </svg>
                                 <span>附加 Terminal 輸出</span>
+                            </div>
+                            <div class="menu-item disabled" id="memoryMenuItem" onclick="insertLastMemorySnapshot()">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M4 19.5A2.5 2.5 0 006.5 22H19"/>
+                                    <path d="M20 6.5V20a2 2 0 01-2 2H6.5a2.5 2.5 0 01-2.5-2.5V6a2 2 0 012-2h5l2 3h7a2 2 0 012 2z"/>
+                                </svg>
+                                <div class="menu-item-text">
+                                    <span>插入上一輪記憶</span>
+                                    <span class="menu-item-note">尚無記憶紀錄</span>
+                                </div>
                             </div>
                             <div class="menu-divider"></div>
                             <div class="menu-item" onclick="showAdvancedSettings()">
