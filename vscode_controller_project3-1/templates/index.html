@@ -179,7 +179,51 @@
                 </div>
             </div>
 
-            <div class="results-container" id="resultsContainer" style="display: none;"></div>
+            <div class="conversation-layout" id="conversationLayout">
+                <div class="results-container" id="resultsContainer" style="display: none;"></div>
+                <div class="memory-panel" id="memoryPanel" style="display: none;">
+                    <div class="memory-panel-header">
+                        <div class="memory-title-group">
+                            <h3>記憶與評分</h3>
+                            <span class="memory-project-label" id="memoryProjectLabel">尚未選擇專案</span>
+                        </div>
+                        <div class="memory-header-actions">
+                            <span class="memory-score" id="memoryScoreDisplay">--</span>
+                            <button class="memory-collapse-btn" id="memoryCollapseBtn" onclick="toggleMemoryPanel()" aria-label="切換記憶面板" aria-expanded="true">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="9 6 15 12 9 18"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="memory-panel-body" id="memoryPanelBody">
+                        <section class="memory-section">
+                            <h4>品質評分</h4>
+                            <div class="memory-evaluation-list" id="memoryEvaluationList"></div>
+                        </section>
+                        <section class="memory-section">
+                            <h4>專案摘要</h4>
+                            <p class="memory-text" id="memorySummaryBox">尚未建立專案總結</p>
+                        </section>
+                        <section class="memory-section">
+                            <h4>短期記憶</h4>
+                            <ul class="memory-list" id="memorySTMBox">
+                                <li class="memory-placeholder">尚未累積短期記憶</li>
+                            </ul>
+                        </section>
+                        <section class="memory-section">
+                            <h4>長期記憶</h4>
+                            <ul class="memory-list" id="memoryLTMBox">
+                                <li class="memory-placeholder">尚未建立長期記憶</li>
+                            </ul>
+                        </section>
+                        <section class="memory-section">
+                            <h4>專案目標</h4>
+                            <div class="memory-goals-list" id="memoryGoalsList"></div>
+                        </section>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <div class="input-area">
@@ -216,6 +260,22 @@
                                     <line x1="12" y1="19" x2="20" y2="19"/>
                                 </svg>
                                 <span>附加 Terminal 輸出</span>
+                            </div>
+                            <div class="menu-item" id="memoryMenuItem" onclick="toggleAutoAttachMemory()">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 20l9-5-9-5-9 5 9 5z"/>
+                                    <path d="M3 10l9-5 9 5"/>
+                                </svg>
+                                <span>自動附加記憶上下文</span>
+                            </div>
+                            <div class="menu-hint" id="memorySuggestionPreview">上一輪改進建議：尚未有資料</div>
+                            <div class="menu-item" id="diagnosticsMenuItem" onclick="toggleSyntaxDiagnostics()">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <rect x="3" y="4" width="14" height="16" rx="2"/>
+                                    <path d="M9 2h6v4"/>
+                                    <path d="M8 13l2.5 2.5L14 12"/>
+                                </svg>
+                                <span>語法偵錯報告</span>
                             </div>
                             <div class="menu-divider"></div>
                             <div class="menu-item" onclick="showAdvancedSettings()">
