@@ -179,7 +179,67 @@
                 </div>
             </div>
 
-            <div class="results-container" id="resultsContainer" style="display: none;"></div>
+            <div class="conversation-layout" id="conversationLayout" style="display: none;">
+                <div class="conversation-main">
+                    <div class="results-container" id="resultsContainer" style="display: none;"></div>
+                </div>
+                <div class="memory-column">
+                    <div class="memory-panel" id="memoryPanel">
+                        <div class="memory-panel-header">
+                            <div class="memory-panel-title">
+                                <h3>記憶與自評</h3>
+                                <span class="memory-updated" id="memoryUpdatedAt">尚未更新</span>
+                            </div>
+                            <button class="collapse-memory-btn" id="memoryPanelCollapseBtn" onclick="toggleMemoryPanel()" title="收合或展開記憶面板">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="6 9 12 15 18 9"/>
+                                </svg>
+                            </button>
+                        </div>
+                        <div class="memory-panel-body" id="memoryPanelBody">
+                            <div class="memory-empty" id="memoryEmptyState">尚未載入記憶資料。</div>
+                            <div class="memory-score-section" id="memoryScoreSection">
+                                <div class="memory-score-value" id="memoryScoreValue">--</div>
+                                <div class="memory-score-label">本輪評分</div>
+                            </div>
+                            <div class="memory-text-section">
+                                <div class="memory-text-title">內容評價</div>
+                                <p class="memory-text" id="memoryEvaluationText">請先執行一次請求。</p>
+                            </div>
+                            <div class="memory-text-section">
+                                <div class="memory-text-title">扣分原因</div>
+                                <p class="memory-text" id="memoryDeductionText">無</p>
+                            </div>
+                            <div class="memory-text-section">
+                                <div class="memory-text-title">改進建議</div>
+                                <p class="memory-text" id="memoryImprovementText">尚無建議。</p>
+                            </div>
+                            <div class="memory-divider"></div>
+                            <div class="memory-text-section">
+                                <div class="memory-text-title">專案總結</div>
+                                <p class="memory-text" id="memorySummaryText">尚未建立摘要。</p>
+                            </div>
+                            <div class="memory-text-section">
+                                <div class="memory-text-title">短期記憶</div>
+                                <pre class="memory-pre" id="memoryShortTermText">尚無記錄。</pre>
+                            </div>
+                            <div class="memory-text-section">
+                                <div class="memory-text-title">長期記憶</div>
+                                <ul class="memory-list" id="memoryLongTermList"></ul>
+                            </div>
+                            <div class="memory-text-section">
+                                <div class="memory-text-title">專案目標</div>
+                                <div class="memory-goals" id="memoryGoalsList"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <button class="memory-panel-floating-toggle" id="memoryPanelFloatingToggle" onclick="toggleMemoryPanel()" title="展開記憶面板">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M4 12h16M10 6l-6 6 6 6"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
         </div>
 
         <div class="input-area">
@@ -216,6 +276,19 @@
                                     <line x1="12" y1="19" x2="20" y2="19"/>
                                 </svg>
                                 <span>附加 Terminal 輸出</span>
+                            </div>
+                            <div class="menu-item menu-toggle" id="memoryAttachToggle" onclick="toggleMemoryAttachment()">
+                                <div class="menu-toggle-text">
+                                    <span>自動附加記憶與目標</span>
+                                    <small id="memoryAttachStatus">開啟</small>
+                                </div>
+                                <div class="menu-toggle-indicator"></div>
+                            </div>
+                            <div class="menu-item" id="lastImprovementMenuItem" onclick="insertLastImprovementSuggestion()" style="display: none;">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 5v14M5 12h14"/>
+                                </svg>
+                                <span>插入上一輪改進建議</span>
                             </div>
                             <div class="menu-divider"></div>
                             <div class="menu-item" onclick="showAdvancedSettings()">
