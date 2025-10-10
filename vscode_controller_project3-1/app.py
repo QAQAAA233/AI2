@@ -17,11 +17,14 @@ import json
 import platform
 import logging
 import queue
-from typing import Dict, List, Optional, Tuple, Any
+import shutil
+import tempfile
+from typing import Dict, List, Optional, Tuple, Any, Callable
 from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass, asdict, field
 from enum import Enum
+from html.parser import HTMLParser
 
 # Web framework imports
 from flask import Flask, render_template, jsonify, request, send_file
@@ -194,6 +197,8 @@ class ProjectConversation:
     messages: List[ConversationMessage] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+    memory_snapshot: Dict[str, Any] = field(default_factory=dict)
+    evaluation_snapshot: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class ProcessResult:
@@ -211,6 +216,18 @@ class ProcessResult:
     is_iteration: bool = False
     usage_metadata: Optional[Dict] = None
     terminal_output: str = ""
+    memory_snapshot: Optional[Dict[str, Any]] = None
+    evaluation_snapshot: Optional[Dict[str, Any]] = None
+    diagnostics: List[Dict[str, Any]] = field(default_factory=list)
+    attached_terminal_snapshot: Optional[str] = None
+    diagnostics_prompt: str = ""
+
+
+@dataclass
+class DiagnosticsResult:
+    """語法偵錯結果結構"""
+    entries: List[Dict[str, Any]] = field(default_factory=list)
+    prompt_block: str = ""
 
 # ============================================
 # JSON Schema 定義 - 繁體中文化
@@ -221,141 +238,135 @@ def get_json_schema():
     return {
         "type": "object",
         "properties": {
-            "project_name": {"type": "string", "description": "專案名稱"},
-            "description": {"type": "string", "description": "專案描述"},
-            "main_file": {"type": "string", "description": "主要執行檔案"},
-            "setup_instructions": {"type": "array", "items": {"type": "string"}, "description": "設置指令"},
-            "run_instructions": {"type": "array", "items": {"type": "string"}, "description": "執行指令"},
-            "files": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "filename": {"type": "string", "description": "檔案名稱(含副檔名)"},
-                        "filetype": {
-                            "type": "string",
-                            "enum": ["python", "javascript", "html", "css", "typescript", "java", "cpp", "c", "go", "rust", "ruby", "php", "swift", "kotlin", "sql", "shell", "yaml", "json", "xml", "markdown", "text"],
-                            "description": "檔案類型"
+            "評分": {"type": "integer", "minimum": 0, "maximum": 100, "description": "請針對本次回應品質給出 0-100 分的整數評分"},
+            "內容評價": {"type": "string", "description": "200 字以內的簡短評論,需涵蓋規則遵守與內容品質"},
+            "扣分原因": {"type": "string", "description": "若評分未滿分,需具體指出扣分原因,否則填寫『無』"},
+            "改進建議": {"type": "string", "description": "列出下次回覆可改進之處,若無則填寫『無』"},
+            "核心記憶模塊": {
+                "type": "object",
+                "description": "保存長短期記憶與專案目標的模塊",
+                "properties": {
+                    "專案總結": {"type": "string", "description": "概述目前專案或對話重點"},
+                    "短期記憶": {"type": "string", "description": "近期對話中與當前任務最相關的資訊"},
+                    "長期記憶": {"type": "string", "description": "專案長期背景、核心目標或重要限制"},
+                    "專案目標": {
+                        "type": "array",
+                        "description": "依序列出至少四個專案目標與狀態",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "步驟": {"type": "integer", "description": "目標步驟編號"},
+                                "任務": {"type": "string", "description": "具體任務描述"},
+                                "狀態": {"type": "string", "enum": ["未開始", "進行中", "已完成"], "description": "任務狀態"},
+                                "是否為當前任務": {"type": "boolean", "description": "此任務是否為目前主要工作"}
+                            },
+                            "required": ["步驟", "任務", "狀態", "是否為當前任務"]
                         },
-                        "code": {"type": "string", "description": "完整程式碼內容"},
-                        "opens_window": {"type": "boolean", "description": "是否會開啟視窗"},
-                        "window_title": {"type": ["string", "null"], "description": "視窗標題(如果有)"},
-                        "install_requirements": {"type": "array", "items": {"type": "string"}, "description": "安裝需求(如 pip install package)"},
-                        "dependencies": {"type": "array", "items": {"type": "string"}, "description": "相依套件"},
-                        "description": {"type": "string", "description": "檔案描述"},
-                        "run_command": {"type": ["string", "null"], "description": "執行命令"},
-                        "is_web_app": {"type": "boolean", "description": "是否為網頁應用"},
-                        "can_open_standalone": {"type": "boolean", "description": "主程式是否能自動開啟獨立瀏覽器視窗"},
-                        "server_address": {"type": ["string", "null"], "description": "伺服器地址(如 http://localhost:5000)"},
-                        "web_title": {"type": ["string", "null"], "description": "網頁標題"}
-                    },
-                    "required": ["filename", "filetype", "code", "opens_window"]
-                }
+                        "minItems": 4
+                    }
+                },
+                "required": ["專案總結", "短期記憶", "長期記憶", "專案目標"]
+            },
+            "專案輸出": {
+                "type": "object",
+                "description": "包含完整程式碼與操作資訊的區塊",
+                "properties": {
+                    "project_name": {"type": "string", "description": "專案名稱"},
+                    "description": {"type": "string", "description": "專案描述"},
+                    "main_file": {"type": "string", "description": "主要執行檔案"},
+                    "setup_instructions": {"type": "array", "items": {"type": "string"}, "description": "設置指令"},
+                    "run_instructions": {"type": "array", "items": {"type": "string"}, "description": "執行指令"},
+                    "files": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "filename": {"type": "string", "description": "檔案名稱(含副檔名)"},
+                                "filetype": {
+                                    "type": "string",
+                                    "enum": ["python", "javascript", "html", "css", "typescript", "java", "cpp", "c", "go", "rust", "ruby", "php", "swift", "kotlin", "sql", "shell", "yaml", "json", "xml", "markdown", "text"],
+                                    "description": "檔案類型"
+                                },
+                                "code": {"type": "string", "description": "完整程式碼內容"},
+                                "opens_window": {"type": "boolean", "description": "是否會開啟視窗"},
+                                "window_title": {"type": ["string", "null"], "description": "視窗標題(如果有)"},
+                                "install_requirements": {"type": "array", "items": {"type": "string"}, "description": "安裝需求(如 pip install package)"},
+                                "dependencies": {"type": "array", "items": {"type": "string"}, "description": "相依套件"},
+                                "description": {"type": "string", "description": "檔案描述"},
+                                "run_command": {"type": ["string", "null"], "description": "執行命令"},
+                                "is_web_app": {"type": "boolean", "description": "是否為網頁應用"},
+                                "can_open_standalone": {"type": "boolean", "description": "主程式是否能自動開啟獨立瀏覽器視窗"},
+                                "server_address": {"type": ["string", "null"], "description": "伺服器地址(如 http://localhost:5000)"},
+                                "web_title": {"type": ["string", "null"], "description": "網頁標題"}
+                            },
+                            "required": ["filename", "filetype", "code", "opens_window"]
+                        }
+                    }
+                },
+                "required": ["project_name", "description", "files"]
             }
         },
-        "required": ["project_name", "description", "files"]
+        "required": ["評分", "內容評價", "扣分原因", "改進建議", "核心記憶模塊", "專案輸出"]
     }
 
 def get_json_system_instruction():
     """獲取 JSON 模式的系統指令 - 繁體中文版 + Flask修復"""
-    return """你是一位專業的程式碼助手,能夠生成完整、可運行的專案程式碼。
+    return """你是一位專業的程式碼與專案助理,負責在每次回應中同時提供程式碼成果、評分與記憶管理資訊。
 
-回應時,你必須輸出一個符合以下結構的有效 JSON 物件:
+請務必輸出**單一 JSON 物件**,其欄位結構如下:
 {
-    "project_name": "描述性的專案名稱",
-    "description": "專案功能的簡要描述",
-    "main_file": "main.py",
-    "setup_instructions": ["pip install package1", "pip install package2"],
-    "run_instructions": ["python main.py", "開啟瀏覽器前往 http://localhost:5000"],
-    "files": [
-        {
-            "filename": "main.py",
-            "filetype": "python",
-            "code": "import flask\\n\\napp = flask.Flask(__name__)\\n\\n@app.route('/')\\ndef home():\\n    return 'Hello World'\\n\\nif __name__ == '__main__':\\n    app.run(host='0.0.0.0', port=5000)",
-            "opens_window": false,
-            "window_title": null,
-            "install_requirements": ["pip install flask"],
-            "dependencies": ["flask"],
-            "description": "主應用程式檔案",
-            "run_command": "python main.py",
-            "is_web_app": true,
-            "can_open_standalone": false,
-            "server_address": "http://localhost:5000",
-            "web_title": "我的網頁應用"
-        }
-    ]
+  "評分": 0-100 的整數,
+  "內容評價": "200 字內的綜合評論",
+  "扣分原因": "若無扣分請填『無』",
+  "改進建議": "下一次回應可改進的方向,若無請填『無』",
+  "核心記憶模塊": {
+      "專案總結": "摘要最新對話或專案重點",
+      "短期記憶": "以條列方式列出最近幾輪對話中的關鍵資訊，請使用 '- ' 作為每條開頭",
+      "長期記憶": "以條列方式整理專案背景、核心目標或重要限制，請使用 '- ' 作為每條開頭",
+      "專案目標": [
+          {"步驟": 1, "任務": "...", "狀態": "已完成/進行中/未開始", "是否為當前任務": true/false},
+          {"步驟": 2, ... 至少四個項目 }
+      ]
+  },
+  "專案輸出": {
+      "project_name": "專案名稱",
+      "description": "簡要描述",
+      "main_file": "主要程式檔案名稱",
+      "setup_instructions": ["pip install package1"...],
+      "run_instructions": ["python main.py"...],
+      "files": [
+          {
+              "filename": "檔案名稱(含副檔名)",
+              "filetype": "python/javascript/...",
+              "code": "完整無省略程式碼,使用實際換行符號",
+              "opens_window": true/false,
+              "window_title": null 或字串,
+              "install_requirements": ["pip install ..."],
+              "dependencies": ["flask", "numpy"...],
+              "description": "檔案用途說明",
+              "run_command": "python main.py" 或 null,
+              "is_web_app": true/false,
+              "can_open_standalone": true/false,
+              "server_address": "http://localhost:5000" 或 null,
+              "web_title": "網頁標題" 或 null
+          }
+      ]
+  }
 }
 
-重要格式要則:
-1. "code" 欄位必須包含正確格式化的程式碼,使用真實的換行符號和縮排
-2. 在 code 字串中使用實際的換行字元 (\\n) 和 Tab 字元 (\\t),不是文字上的 \\n 字串
-3. 程式碼必須是有效的 JSON 字串 - 正確跳脫引號
-4. 確保程式碼中的縮排正確保留
-5. 程式碼的每一行應該在 JSON 字串中獨立成行
+嚴格遵守以下規範:
+1. 僅能輸出有效 JSON,不得加入多餘文字、註解或 Markdown。
+2. "files" 內的程式碼必須為完整、可執行、無省略號的繁體中文註解或文字,並以真實 \n 代表換行、\t 代表縮排。
+3. 若為 Flask/Node 等伺服器程式,禁止使用 debug=True 或熱重載模式,Flask 必須採用 `app.run(host='0.0.0.0', port=5000)`。
+4. 所有網頁相關檔案需填寫 `is_web_app`, 並在必要時提供 `server_address` 與 `web_title`。
+5. 任何需要額外套件的檔案,必須在 `install_requirements` 中完整列出安裝指令。
+6. 多檔案專案需確保相依檔案之間的匯入路徑正確,不得遺漏必要資源。
+7. 所有字串請使用繁體中文說明,除非程式語言語法或函式庫名稱要求英文。
+8. 專案目標需依進度更新狀態,並清楚標示當前主要任務。
+9. 若系統提供語法偵錯報告,請優先針對錯誤與警告進行修正,並在內容中說明修正措施。
+10. 評分、扣分原因、改進建議需與本次回覆內容一致,不得空泛。
 
-**CRITICAL Flask/Web Server 要則:**
-1. **絕對禁止使用 debug=True** - 這會導致在 subprocess 中運行時崩潰
-2. Flask 應用必須使用:`app.run(host='0.0.0.0', port=5000)` (不帶 debug 參數)
-3. Node.js/Express 應用也不要使用開發模式的熱重載
-4. 如果需要開發便利性,可以在代碼註釋中說明手動運行時可加 debug=True
-
-網頁應用要則:
-1. 對於 HTML 檔案或伺服器應用程式(Flask、Node.js 等),設定 "is_web_app": true
-2. 只有在你的程式碼包含自動開啟瀏覽器功能時,才設定 "can_open_standalone": true:
-   - Python: 使用 webbrowser.open() 或 Flask 加上 app.run(port=5000) + webbrowser
-   - Node.js: 使用 'open' 套件或類似工具
-   - HTML: 如果是可以直接開啟的獨立 HTML
-3. 如果 "can_open_standalone" 為 false 但 "is_web_app" 為 true,請提供:
-   - "server_address": 應用程式將運行的 URL(例如:"http://localhost:5000")
-   - "web_title": 網頁的標題
-4. 對於獨立的 HTML 檔案,將 opens_window 和 is_web_app 都設為 true
-5. 對於伺服器應用程式,控制器將處理開啟獨立瀏覽器視窗
-
-重要要則:
-1. 始終生成完整、可運行的程式碼 - 不要使用佔位符或省略號
-2. 對於 GUI 應用程式(pygame/tkinter),設定視窗標題以匹配專案名稱
-3. 對於網頁應用,確保 HTML 有適當的 <title> 標籤
-4. 包含所有必要的匯入和錯誤處理
-5. 正確指定檔案類型(python、javascript、html 等)
-6. 對於 GUI 應用程式或獨立 HTML 檔案,將 opens_window 設為 true
-7. 在 install_requirements 中列出所有套件安裝命令
-8. 為每個檔案提供清晰的描述
-9. 對於多檔案專案,確保檔案正確連結
-
-支持的檔案類型:
-python, javascript, html, css, typescript, java, cpp, c, go, rust, ruby, php, swift, kotlin, sql, shell, yaml, json, xml, markdown, text
-
-記住:
-- 只輸出有效的 JSON,不要有額外的文字或 markdown 格式
-- 確保程式碼正確格式化,縮排正確
-- 在程式碼字串中使用真實的換行符號,而不是 \\n 文字
-- 對於網頁應用,仔細考慮獨立瀏覽器視窗的能力
-- **Flask/Web 伺服器絕對不要使用 debug=True**
-
-對於 HTML + 後端專案的特別注意事項:
-1. 確保後端伺服器(Flask/Node.js)正確配置 CORS 和靜態檔案服務
-2. HTML 檔案應該正確引用後端 API 端點
-3. 提供完整的前後端連接測試程式碼
-4. 在 run_instructions 中明確說明:
-   - 先啟動後端伺服器
-   - 後端服務地址
-   - 前端如何訪問
-5. 對於需要同時運行前後端的專案:
-   - 後端檔案設定 is_web_app: true, can_open_standalone: false
-   - 提供準確的 server_address 和 web_title
-   - 確保後端程式碼包含適當的路由和 CORS 設定
-   - **後端絕對不要使用 debug=True**
-6. 測試程式碼應該驗證:
-   - 後端伺服器啟動成功
-   - API 端點可訪問
-   - 前後端數據交互正常
-
-Terminal 輸出和除錯資訊:
-1. 所有重要的執行步驟都應該有 print() 或 console.log() 輸出
-2. 包含適當的錯誤處理和錯誤訊息輸出
-3. 啟動時輸出服務地址和狀態資訊
-4. 對於網頁應用,輸出 "伺服器運行於: http://localhost:PORT"
-"""
+請以這個全新結構回覆,不要沿用舊版模板或刪減任何必要欄位。"""
 
 # ============================================
 # 配置管理模塊
@@ -429,7 +440,7 @@ class ConversationManager:
     def load_conversation(project_dir: str) -> ProjectConversation:
         """載入專案對話歷史 - 正確處理 usage_metadata"""
         conv_file = ConversationManager.get_conversation_file(project_dir)
-        
+
         if not conv_file.exists():
             project_name = Path(project_dir).name
             conv = ProjectConversation(
@@ -466,7 +477,9 @@ class ConversationManager:
                     project_name=data['project_name'],
                     messages=messages,
                     created_at=data.get('created_at', ''),
-                    updated_at=data.get('updated_at', '')
+                    updated_at=data.get('updated_at', ''),
+                    memory_snapshot=data.get('memory_snapshot', {}),
+                    evaluation_snapshot=data.get('evaluation_snapshot', {})
                 )
         except Exception as e:
             logger.error(f"載入對話歷史失敗: {e}")
@@ -503,9 +516,11 @@ class ConversationManager:
                 'project_name': conversation.project_name,
                 'messages': messages_data,
                 'created_at': conversation.created_at,
-                'updated_at': conversation.updated_at
+                'updated_at': conversation.updated_at,
+                'memory_snapshot': conversation.memory_snapshot,
+                'evaluation_snapshot': conversation.evaluation_snapshot
             }
-            
+
             with open(conv_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             
@@ -533,6 +548,20 @@ class ConversationManager:
         )
         
         conversation.messages.append(message)
+        ConversationManager.save_conversation(conversation)
+
+    @staticmethod
+    def update_memory_state(project_dir: str, memory_snapshot: Optional[Dict], evaluation_snapshot: Optional[Dict]):
+        """更新對話的記憶與評分快照"""
+        conversation = ConversationManager.load_conversation(project_dir)
+
+        if memory_snapshot:
+            conversation.memory_snapshot = memory_snapshot
+        if evaluation_snapshot:
+            conversation.evaluation_snapshot = {
+                k: v for k, v in (evaluation_snapshot or {}).items() if v is not None
+            }
+
         ConversationManager.save_conversation(conversation)
     
     @staticmethod
@@ -1122,16 +1151,17 @@ class CodeProcessor:
     def parse_json_response(json_data: Dict) -> ProjectOutput:
         """解析 JSON 格式的 AI 回應"""
         try:
+            project_section = json_data.get('專案輸出', json_data)
             files = []
-            for file_data in json_data.get('files', []):
+            for file_data in project_section.get('files', []):
                 code = file_data.get('code', '')
-                
+
                 if isinstance(code, str):
                     code = code.replace('\\n', '\n')
                     code = code.replace('\\t', '\t')
                     code = code.replace('\\"', '"')
                     code = code.replace("\\'", "'")
-                
+
                 files.append(FileOutput(
                     filename=file_data.get('filename', 'untitled.txt'),
                     filetype=file_data.get('filetype', 'text'),
@@ -1147,16 +1177,16 @@ class CodeProcessor:
                     server_address=file_data.get('server_address'),
                     web_title=file_data.get('web_title')
                 ))
-            
+
             return ProjectOutput(
-                project_name=json_data.get('project_name', 'untitled_project'),
-                description=json_data.get('description', ''),
+                project_name=project_section.get('project_name', 'untitled_project'),
+                description=project_section.get('description', ''),
                 files=files,
-                main_file=json_data.get('main_file'),
-                setup_instructions=json_data.get('setup_instructions'),
-                run_instructions=json_data.get('run_instructions')
+                main_file=project_section.get('main_file'),
+                setup_instructions=project_section.get('setup_instructions'),
+                run_instructions=project_section.get('run_instructions')
             )
-        
+
         except Exception as e:
             logger.error(f"解析 JSON 回應失敗: {e}")
             raise
@@ -1250,6 +1280,865 @@ class CodeProcessor:
             saved_files.append(str(info_file))
         
         return saved_files, updated_files
+
+
+class DiagnosticsManager:
+    """語法偵錯管理器"""
+
+    SUPPORTED_EXTENSIONS = {
+        '.py': 'Python',
+        '.js': 'JavaScript',
+        '.mjs': 'JavaScript',
+        '.cjs': 'JavaScript',
+        '.ts': 'TypeScript',
+        '.tsx': 'TypeScript',
+        '.jsx': 'JavaScript (JSX)',
+        '.json': 'JSON',
+        '.yaml': 'YAML',
+        '.yml': 'YAML',
+        '.html': 'HTML',
+        '.htm': 'HTML',
+        '.css': 'CSS',
+        '.c': 'C',
+        '.h': 'C',
+        '.cpp': 'C++',
+        '.cxx': 'C++',
+        '.cc': 'C++',
+        '.hpp': 'C++',
+        '.go': 'Go',
+        '.java': 'Java',
+        '.kt': 'Kotlin',
+        '.kts': 'Kotlin',
+        '.swift': 'Swift',
+        '.rs': 'Rust',
+        '.rb': 'Ruby',
+        '.php': 'PHP',
+        '.sh': 'Shell',
+        '.bash': 'Shell',
+        '.zsh': 'Shell',
+        '.sql': 'SQL',
+        '.cs': 'C#'
+    }
+
+    FILETYPE_LANGUAGE = {
+        'python': 'Python',
+        'javascript': 'JavaScript',
+        'typescript': 'TypeScript',
+        'html': 'HTML',
+        'css': 'CSS',
+        'json': 'JSON',
+        'yaml': 'YAML',
+        'yml': 'YAML',
+        'go': 'Go',
+        'java': 'Java',
+        'cpp': 'C++',
+        'c++': 'C++',
+        'c': 'C',
+        'ruby': 'Ruby',
+        'php': 'PHP',
+        'shell': 'Shell',
+        'bash': 'Shell',
+        'sh': 'Shell',
+        'swift': 'Swift',
+        'kotlin': 'Kotlin',
+        'sql': 'SQL',
+        'rust': 'Rust',
+        'csharp': 'C#',
+        'c#': 'C#'
+    }
+
+    MAX_ANALYSIS_BYTES = 512 * 1024
+
+    @staticmethod
+    def collect(folder_path: str, files: List[Dict]) -> DiagnosticsResult:
+        """針對目前專案及附加檔案執行語法偵錯"""
+        result = DiagnosticsResult()
+        processed: set = set()
+        files = files or []
+
+        for file_entry in files:
+            identifier = file_entry.get('name') or file_entry.get('filename')
+            if not identifier:
+                continue
+
+            language = DiagnosticsManager._resolve_language(
+                identifier,
+                file_entry.get('filetype') or file_entry.get('language')
+            )
+
+            if not language:
+                continue
+
+            key = (identifier, language)
+            if key in processed:
+                continue
+
+            content = file_entry.get('content')
+            if not isinstance(content, str):
+                continue
+
+            if content.startswith('data:') and 'base64,' in content:
+                # Binary data 或非文字資料
+                continue
+
+            normalized_content = DiagnosticsManager._trim_content(content)
+            if normalized_content is None:
+                continue
+
+            entry = DiagnosticsManager._analyze(identifier, language, normalized_content)
+            if entry:
+                entry['來源'] = '附加檔案'
+                result.entries.append(entry)
+                processed.add(key)
+
+        if not result.entries:
+            project_dir = Path(folder_path)
+            if project_dir.exists():
+                for path in project_dir.rglob('*'):
+                    if not path.is_file():
+                        continue
+
+                    identifier = str(path.relative_to(project_dir))
+                    language = DiagnosticsManager._resolve_language(identifier)
+                    if not language:
+                        continue
+
+                    key = (identifier, language)
+                    if key in processed:
+                        continue
+
+                    content = DiagnosticsManager._read_file_safely(path)
+                    if content is None:
+                        continue
+
+                    entry = DiagnosticsManager._analyze(identifier, language, content)
+                    if entry:
+                        entry['來源'] = '專案檔案'
+                        result.entries.append(entry)
+                        processed.add(key)
+
+        if result.entries:
+            ordering = {'error': 0, 'warning': 1, 'info': 2, 'success': 3}
+            icon_map = {'error': '❌', 'warning': '⚠️', 'info': 'ℹ️', 'success': '✅'}
+
+            ordered_entries = sorted(
+                result.entries,
+                key=lambda item: ordering.get(item.get('狀態', 'info'), 2)
+            )
+
+            lines = []
+            for entry in ordered_entries:
+                status = entry.get('狀態', 'info')
+                icon = icon_map.get(status, 'ℹ️')
+                lines.append(
+                    f"{icon} {entry.get('檔案')} ({entry.get('語言')}): {entry.get('訊息')}"
+                )
+
+            lines.append('請優先修正 ❌ 與 ⚠️ 標記的檔案，再進行其他優化或功能擴充。')
+            result.prompt_block = '\n'.join(lines)
+
+        return result
+
+    @staticmethod
+    def _resolve_language(filename: str, declared_type: Optional[str] = None) -> Optional[str]:
+        extension = Path(filename).suffix.lower()
+        language = DiagnosticsManager.SUPPORTED_EXTENSIONS.get(extension)
+        if language:
+            return language
+
+        if declared_type:
+            language = DiagnosticsManager.FILETYPE_LANGUAGE.get(declared_type.lower())
+            if language:
+                return language
+
+        return None
+
+    @staticmethod
+    def _trim_content(content: str) -> Optional[str]:
+        if not isinstance(content, str):
+            return None
+
+        if len(content.encode('utf-8', errors='ignore')) > DiagnosticsManager.MAX_ANALYSIS_BYTES:
+            return None
+
+        return content
+
+    @staticmethod
+    def _read_file_safely(path: Path) -> Optional[str]:
+        try:
+            if path.stat().st_size > DiagnosticsManager.MAX_ANALYSIS_BYTES:
+                return None
+            return path.read_text(encoding='utf-8')
+        except Exception as e:
+            logger.warning(f"無法讀取檔案 {path}: {e}")
+            return None
+
+    @staticmethod
+    def _run_cli_checker(
+        identifier: str,
+        language: str,
+        content: str,
+        executable_candidates: List[str],
+        args_builder: Callable[[str], List[str]],
+        success_message: str,
+        missing_message: str,
+        suffix: str,
+        timeout: int = 20
+    ) -> Dict[str, Any]:
+        exe_path = None
+        for candidate in executable_candidates:
+            candidate_path = shutil.which(candidate)
+            if candidate_path:
+                exe_path = candidate_path
+                break
+
+        if not exe_path:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                language,
+                'warning',
+                missing_message
+            )
+
+        with tempfile.NamedTemporaryFile('w', suffix=suffix, delete=False, encoding='utf-8') as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        try:
+            args = [exe_path]
+            args.extend(list(args_builder(tmp_path)))
+            completed = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+            if completed.returncode == 0:
+                return DiagnosticsManager._build_entry(
+                    identifier,
+                    language,
+                    'success',
+                    success_message
+                )
+
+            output = completed.stderr.strip() or completed.stdout.strip() or '未知錯誤'
+            return DiagnosticsManager._build_entry(identifier, language, 'error', output)
+        except subprocess.TimeoutExpired:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                language,
+                'warning',
+                '語法偵錯超時，請檢查程式是否存在無限迴圈或大型檔案'
+            )
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _build_entry(identifier: str, language: str, status: str, message: str) -> Dict[str, Any]:
+        return {
+            '檔案': identifier,
+            '語言': language,
+            '狀態': status,
+            '訊息': message
+        }
+
+    @staticmethod
+    def _analyze(identifier: str, language: str, content: str) -> Optional[Dict[str, Any]]:
+        try:
+            if language == 'Python':
+                return DiagnosticsManager._check_python(identifier, content)
+            if language.startswith('JavaScript'):
+                return DiagnosticsManager._check_javascript(identifier, content)
+            if language == 'TypeScript':
+                return DiagnosticsManager._check_typescript(identifier, content)
+            if language == 'JSON':
+                return DiagnosticsManager._check_json(identifier, content)
+            if language == 'YAML':
+                return DiagnosticsManager._check_yaml(identifier, content)
+            if language == 'HTML':
+                return DiagnosticsManager._check_html(identifier, content)
+            if language == 'CSS':
+                return DiagnosticsManager._check_css(identifier, content)
+            if language == 'Shell':
+                return DiagnosticsManager._check_shell(identifier, content)
+            if language == 'PHP':
+                return DiagnosticsManager._check_php(identifier, content)
+            if language == 'Ruby':
+                return DiagnosticsManager._check_ruby(identifier, content)
+            if language == 'Go':
+                return DiagnosticsManager._check_go(identifier, content)
+            if language == 'C':
+                return DiagnosticsManager._check_c(identifier, content)
+            if language == 'C++':
+                return DiagnosticsManager._check_cpp(identifier, content)
+            if language == 'Java':
+                return DiagnosticsManager._check_java(identifier, content)
+            if language == 'Kotlin':
+                return DiagnosticsManager._check_kotlin(identifier, content)
+            if language == 'Swift':
+                return DiagnosticsManager._check_swift(identifier, content)
+            if language == 'Rust':
+                return DiagnosticsManager._check_rust(identifier, content)
+            if language == 'SQL':
+                return DiagnosticsManager._check_sql(identifier, content)
+            if language == 'C#':
+                return DiagnosticsManager._check_csharp(identifier, content)
+
+            return DiagnosticsManager._build_entry(
+                identifier,
+                language,
+                'info',
+                '尚未支援此語言的語法偵錯'
+            )
+        except Exception as e:
+            logger.error(f"語法偵錯失敗 {identifier}: {e}")
+            return DiagnosticsManager._build_entry(
+                identifier,
+                language,
+                'warning',
+                f'無法完成語法偵錯: {e}'
+            )
+
+    @staticmethod
+    def _check_python(identifier: str, content: str) -> Dict[str, Any]:
+        try:
+            compile(content, identifier, 'exec')
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'Python',
+                'success',
+                '語法檢查通過'
+            )
+        except SyntaxError as e:
+            message = f"{e.msg} (第 {e.lineno} 行, 第 {e.offset or 0} 列)"
+            return DiagnosticsManager._build_entry(identifier, 'Python', 'error', message)
+
+    @staticmethod
+    def _check_javascript(identifier: str, content: str) -> Dict[str, Any]:
+        node_path = shutil.which('node')
+        if not node_path:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'JavaScript',
+                'warning',
+                '系統未安裝 Node.js，無法執行語法檢查'
+            )
+
+        with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False, encoding='utf-8') as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        try:
+            completed = subprocess.run(
+                [node_path, '--check', tmp_path],
+                capture_output=True,
+                text=True,
+                timeout=15
+            )
+            if completed.returncode == 0:
+                return DiagnosticsManager._build_entry(
+                    identifier,
+                    'JavaScript',
+                    'success',
+                    '語法檢查通過'
+                )
+
+            output = completed.stderr.strip() or completed.stdout.strip()
+            if not output:
+                output = '未知錯誤'
+            return DiagnosticsManager._build_entry(identifier, 'JavaScript', 'error', output)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _check_typescript(identifier: str, content: str) -> Dict[str, Any]:
+        tsc_path = shutil.which('tsc')
+        if not tsc_path:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'TypeScript',
+                'warning',
+                '系統未安裝 TypeScript 編譯器 (tsc)'
+            )
+
+        with tempfile.NamedTemporaryFile('w', suffix='.ts', delete=False, encoding='utf-8') as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        try:
+            completed = subprocess.run(
+                [tsc_path, '--pretty', 'false', '--noEmit', tmp_path],
+                capture_output=True,
+                text=True,
+                timeout=20
+            )
+            if completed.returncode == 0:
+                return DiagnosticsManager._build_entry(
+                    identifier,
+                    'TypeScript',
+                    'success',
+                    '語法檢查通過'
+                )
+
+            output = completed.stderr.strip() or completed.stdout.strip()
+            if not output:
+                output = '未知錯誤'
+            return DiagnosticsManager._build_entry(identifier, 'TypeScript', 'error', output)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _check_json(identifier: str, content: str) -> Dict[str, Any]:
+        try:
+            json.loads(content)
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'JSON',
+                'success',
+                '語法檢查通過'
+            )
+        except json.JSONDecodeError as e:
+            message = f"第 {e.lineno} 行第 {e.colno} 列附近: {e.msg}"
+            return DiagnosticsManager._build_entry(identifier, 'JSON', 'error', message)
+
+    @staticmethod
+    def _check_yaml(identifier: str, content: str) -> Dict[str, Any]:
+        try:
+            import yaml  # type: ignore
+        except ImportError:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'YAML',
+                'warning',
+                '未安裝 PyYAML，請安裝後再次偵錯'
+            )
+
+        try:
+            yaml.safe_load(content)
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'YAML',
+                'success',
+                '語法檢查通過'
+            )
+        except yaml.YAMLError as e:  # type: ignore
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'YAML',
+                'error',
+                str(e)
+            )
+
+    @staticmethod
+    def _check_html(identifier: str, content: str) -> Dict[str, Any]:
+        class _Validator(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.errors: List[str] = []
+
+            def error(self, message):
+                self.errors.append(message)
+
+        parser = _Validator()
+        try:
+            parser.feed(content)
+            parser.close()
+        except Exception as e:
+            return DiagnosticsManager._build_entry(identifier, 'HTML', 'error', str(e))
+
+        if parser.errors:
+            return DiagnosticsManager._build_entry(identifier, 'HTML', 'warning', '; '.join(parser.errors))
+
+        return DiagnosticsManager._build_entry(
+            identifier,
+            'HTML',
+            'success',
+            '基本結構檢查通過 (未執行嚴格 HTML 驗證)'
+        )
+
+    @staticmethod
+    def _check_css(identifier: str, content: str) -> Dict[str, Any]:
+        open_braces = content.count('{')
+        close_braces = content.count('}')
+        if open_braces != close_braces:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'CSS',
+                'error',
+                f'大括號數量不匹配: 開括號 {open_braces} 個, 關括號 {close_braces} 個'
+            )
+
+        return DiagnosticsManager._build_entry(
+            identifier,
+            'CSS',
+            'success',
+            '基本語法檢查通過 (未執行進階驗證)'
+        )
+
+    @staticmethod
+    def _check_shell(identifier: str, content: str) -> Dict[str, Any]:
+        return DiagnosticsManager._run_cli_checker(
+            identifier,
+            'Shell',
+            content,
+            ['bash', 'sh'],
+            lambda path: ['-n', path],
+            '語法檢查通過 (bash/sh)',
+            '系統未找到可用的 shell (bash/sh)，無法執行 Shell 語法檢查',
+            '.sh',
+            timeout=15
+        )
+
+    @staticmethod
+    def _check_php(identifier: str, content: str) -> Dict[str, Any]:
+        return DiagnosticsManager._run_cli_checker(
+            identifier,
+            'PHP',
+            content,
+            ['php'],
+            lambda path: ['-l', path],
+            '語法檢查通過 (php -l)',
+            '系統未安裝 PHP，無法執行語法檢查',
+            '.php'
+        )
+
+    @staticmethod
+    def _check_ruby(identifier: str, content: str) -> Dict[str, Any]:
+        return DiagnosticsManager._run_cli_checker(
+            identifier,
+            'Ruby',
+            content,
+            ['ruby'],
+            lambda path: ['-c', path],
+            '語法檢查通過 (ruby -c)',
+            '系統未安裝 Ruby，無法執行語法檢查',
+            '.rb'
+        )
+
+    @staticmethod
+    def _check_go(identifier: str, content: str) -> Dict[str, Any]:
+        return DiagnosticsManager._run_cli_checker(
+            identifier,
+            'Go',
+            content,
+            ['gofmt'],
+            lambda path: [path],
+            '語法檢查通過 (gofmt)',
+            '系統未安裝 gofmt，無法執行 Go 語法檢查',
+            '.go',
+            timeout=20
+        )
+
+    @staticmethod
+    def _check_c(identifier: str, content: str) -> Dict[str, Any]:
+        return DiagnosticsManager._run_cli_checker(
+            identifier,
+            'C',
+            content,
+            ['gcc', 'clang'],
+            lambda path: ['-fsyntax-only', path],
+            '語法檢查通過 (C 編譯器)',
+            '系統未找到 GCC/Clang，無法執行 C 語法檢查',
+            '.c'
+        )
+
+    @staticmethod
+    def _check_cpp(identifier: str, content: str) -> Dict[str, Any]:
+        return DiagnosticsManager._run_cli_checker(
+            identifier,
+            'C++',
+            content,
+            ['g++', 'clang++'],
+            lambda path: ['-fsyntax-only', path],
+            '語法檢查通過 (C++ 編譯器)',
+            '系統未找到 G++/Clang++，無法執行 C++ 語法檢查',
+            '.cpp'
+        )
+
+    @staticmethod
+    def _check_java(identifier: str, content: str) -> Dict[str, Any]:
+        javac_path = shutil.which('javac')
+        if not javac_path:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'Java',
+                'warning',
+                '系統未安裝 javac，無法執行 Java 語法檢查'
+            )
+
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                source_name = Path(identifier).name or 'Main.java'
+                if not source_name.endswith('.java'):
+                    source_name += '.java'
+                source_path = Path(tmpdir) / source_name
+                source_path.write_text(content, encoding='utf-8')
+
+                completed = subprocess.run(
+                    [javac_path, '-d', tmpdir, str(source_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+
+                if completed.returncode == 0:
+                    return DiagnosticsManager._build_entry(
+                        identifier,
+                        'Java',
+                        'success',
+                        '語法檢查通過 (javac)'
+                    )
+
+                output = completed.stderr.strip() or completed.stdout.strip() or '未知錯誤'
+                return DiagnosticsManager._build_entry(identifier, 'Java', 'error', output)
+        except subprocess.TimeoutExpired:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'Java',
+                'warning',
+                'javac 語法檢查逾時，請檢查程式是否存在長時間運算'
+            )
+        except Exception as e:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'Java',
+                'warning',
+                f'無法完成 Java 語法檢查: {e}'
+            )
+
+    @staticmethod
+    def _check_kotlin(identifier: str, content: str) -> Dict[str, Any]:
+        kotlinc_path = shutil.which('kotlinc')
+        if not kotlinc_path:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'Kotlin',
+                'warning',
+                '系統未安裝 kotlinc，無法執行 Kotlin 語法檢查'
+            )
+
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                source_name = Path(identifier).name or 'Main.kt'
+                if not source_name.endswith('.kt'):
+                    source_name += '.kt'
+                source_path = Path(tmpdir) / source_name
+                source_path.write_text(content, encoding='utf-8')
+
+                completed = subprocess.run(
+                    [kotlinc_path, '-Werror', '-d', tmpdir, str(source_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+
+                if completed.returncode == 0:
+                    return DiagnosticsManager._build_entry(
+                        identifier,
+                        'Kotlin',
+                        'success',
+                        '語法檢查通過 (kotlinc)'
+                    )
+
+                output = completed.stderr.strip() or completed.stdout.strip() or '未知錯誤'
+                return DiagnosticsManager._build_entry(identifier, 'Kotlin', 'error', output)
+        except subprocess.TimeoutExpired:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'Kotlin',
+                'warning',
+                'kotlinc 語法檢查逾時，請檢查程式結構'
+            )
+        except Exception as e:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'Kotlin',
+                'warning',
+                f'無法完成 Kotlin 語法檢查: {e}'
+            )
+
+    @staticmethod
+    def _check_swift(identifier: str, content: str) -> Dict[str, Any]:
+        swiftc_path = shutil.which('swiftc')
+        if not swiftc_path:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'Swift',
+                'warning',
+                '系統未安裝 swiftc，無法執行 Swift 語法檢查'
+            )
+
+        try:
+            return DiagnosticsManager._run_cli_checker(
+                identifier,
+                'Swift',
+                content,
+                ['swiftc'],
+                lambda path: ['-typecheck', path],
+                '語法檢查通過 (swiftc)',
+                '系統未安裝 swiftc，無法執行 Swift 語法檢查',
+                '.swift',
+                timeout=30
+            )
+        except Exception as e:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'Swift',
+                'warning',
+                f'無法完成 Swift 語法檢查: {e}'
+            )
+
+    @staticmethod
+    def _check_rust(identifier: str, content: str) -> Dict[str, Any]:
+        rustc_path = shutil.which('rustc')
+        if not rustc_path:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'Rust',
+                'warning',
+                '系統未安裝 rustc，無法執行 Rust 語法檢查'
+            )
+
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                source_name = Path(identifier).name or 'main.rs'
+                if not source_name.endswith('.rs'):
+                    source_name += '.rs'
+                source_path = Path(tmpdir) / source_name
+                source_path.write_text(content, encoding='utf-8')
+                output_path = Path(tmpdir) / 'out.rmeta'
+
+                completed = subprocess.run(
+                    [rustc_path, '--emit=metadata', '-o', str(output_path), str(source_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+
+                if completed.returncode == 0:
+                    return DiagnosticsManager._build_entry(
+                        identifier,
+                        'Rust',
+                        'success',
+                        '語法檢查通過 (rustc)'
+                    )
+
+                output = completed.stderr.strip() or completed.stdout.strip() or '未知錯誤'
+                return DiagnosticsManager._build_entry(identifier, 'Rust', 'error', output)
+        except subprocess.TimeoutExpired:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'Rust',
+                'warning',
+                'rustc 語法檢查逾時，請檢查程式是否存在大型巨集或遞迴匯入'
+            )
+        except Exception as e:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'Rust',
+                'warning',
+                f'無法完成 Rust 語法檢查: {e}'
+            )
+
+    @staticmethod
+    def _check_sql(identifier: str, content: str) -> Dict[str, Any]:
+        single_quotes = content.count("'")
+        double_quotes = content.count('"')
+        open_paren = content.count('(')
+        close_paren = content.count(')')
+
+        if single_quotes % 2 != 0:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'SQL',
+                'error',
+                '偵測到未成對的單引號，請確認字串是否完整'
+            )
+
+        if double_quotes % 2 != 0:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'SQL',
+                'error',
+                '偵測到未成對的雙引號，請確認識別字是否完整'
+            )
+
+        if open_paren != close_paren:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'SQL',
+                'error',
+                f'括號數量不一致: 開括號 {open_paren} 個, 關括號 {close_paren} 個'
+            )
+
+        return DiagnosticsManager._build_entry(
+            identifier,
+            'SQL',
+            'success',
+            '基本語法檢查通過 (靜態規則)'
+        )
+
+    @staticmethod
+    def _check_csharp(identifier: str, content: str) -> Dict[str, Any]:
+        compiler = shutil.which('csc') or shutil.which('mcs')
+        if not compiler:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'C#',
+                'warning',
+                '系統未安裝 C# 編譯器 (csc/mcs)，無法執行語法檢查'
+            )
+
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                source_name = Path(identifier).name or 'Program.cs'
+                if not source_name.endswith('.cs'):
+                    source_name += '.cs'
+                source_path = Path(tmpdir) / source_name
+                source_path.write_text(content, encoding='utf-8')
+                output_path = Path(tmpdir) / 'temp.dll'
+
+                if compiler.endswith('mcs'):
+                    args = [compiler, '-t:library', f'-out:{output_path}', str(source_path)]
+                else:
+                    args = [compiler, '/target:library', f'/out:{output_path}', str(source_path)]
+
+                completed = subprocess.run(
+                    args,
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+
+                if completed.returncode == 0:
+                    return DiagnosticsManager._build_entry(
+                        identifier,
+                        'C#',
+                        'success',
+                        '語法檢查通過 (C# 編譯器)'
+                    )
+
+                output = completed.stderr.strip() or completed.stdout.strip() or '未知錯誤'
+                return DiagnosticsManager._build_entry(identifier, 'C#', 'error', output)
+        except subprocess.TimeoutExpired:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'C#',
+                'warning',
+                'C# 編譯器檢查逾時，請檢查是否存在複雜的相依關係'
+            )
+        except Exception as e:
+            return DiagnosticsManager._build_entry(
+                identifier,
+                'C#',
+                'warning',
+                f'無法完成 C# 語法檢查: {e}'
+            )
+
 
 # ============================================
 # 程式執行管理 - 改進版,增加Terminal輸出捕獲
@@ -1660,37 +2549,77 @@ class ProcessManager:
         files: List[Dict] = None,
         is_iteration: bool = False,
         attach_screenshot: bool = False,
-        attach_terminal: bool = False
+        attach_terminal: bool = False,
+        attach_diagnostics: bool = False,
+        user_visible_prompt: Optional[str] = None,
+        memory_context: Optional[str] = None
     ) -> ProcessResult:
         """執行完整的自動化流程 - 修復版"""
-        
+
         result = ProcessResult(success=False, is_iteration=is_iteration)
-        
+
+        diagnostics_result = DiagnosticsResult()
+
         try:
+            files = list(files or [])
+            user_files_snapshot = list(files)
             if is_iteration:
                 logger.info("迭代模式:自動載入專案所有檔案")
                 project_files = ProjectManager.load_project_files(folder_path)
-                
+
                 if not files:
                     files = []
-                
+
                 files.extend(project_files)
                 logger.info(f"已附加 {len(project_files)} 個專案檔案")
             
+            if attach_diagnostics:
+                try:
+                    diagnostics_result = DiagnosticsManager.collect(folder_path, files)
+                    if diagnostics_result.prompt_block:
+                        prompt = (
+                            f"{prompt}\n\n【語法偵錯報告】\n"
+                            f"{diagnostics_result.prompt_block}\n"
+                            "請優先修正上述語法問題，再進行其他需求。"
+                        )
+                except Exception as diag_error:
+                    logger.error(f"語法偵錯報告生成失敗: {diag_error}")
+                    diagnostics_result.entries.append({
+                        '檔案': '系統',
+                        '語言': 'N/A',
+                        '狀態': 'warning',
+                        '訊息': f'無法生成語法偵錯報告: {diag_error}'
+                    })
+
+            result.diagnostics = diagnostics_result.entries
+            result.diagnostics_prompt = diagnostics_result.prompt_block
+
             terminal_output = None
             if attach_terminal:
                 terminal_output = ProgramManager.get_all_terminal_output()
                 if terminal_output:
                     logger.info("已附加Terminal輸出到AI請求")
                     result.terminal_output = terminal_output
-            
+                    result.attached_terminal_snapshot = terminal_output
+
             # ⭐ 修復:在正確的時機保存用戶消息
+            display_prompt = user_visible_prompt or prompt
+
+            metadata_payload = {}
+            if memory_context:
+                metadata_payload['memory_context'] = memory_context
+            if diagnostics_result.entries:
+                metadata_payload['diagnostics'] = diagnostics_result.entries
+                if diagnostics_result.prompt_block:
+                    metadata_payload['diagnostics_prompt'] = diagnostics_result.prompt_block
+
             ConversationManager.add_message(
                 folder_path,
                 'user',
-                prompt,
-                files=[{'name': f.get('name'), 'type': f.get('type')} for f in (files or [])],
-                terminal_output=terminal_output
+                display_prompt,
+                files=[{'name': f.get('name'), 'type': f.get('type')} for f in user_files_snapshot],
+                terminal_output=terminal_output,
+                metadata=metadata_payload or None
             )
             
             if is_iteration and attach_screenshot:
@@ -1763,14 +2692,34 @@ class ProcessManager:
                 prompt, config, files, terminal_output
             )
             result.ai_response = ai_response
-            result.ai_response_json = json_data
             result.usage_metadata = usage_metadata
-            
+
+            normalized_json = {}
+            if json_data:
+                if isinstance(json_data, list):
+                    normalized_json = json_data[0] if json_data else {}
+                else:
+                    normalized_json = json_data
+
+            if normalized_json:
+                memory_snapshot = normalized_json.get('核心記憶模塊') or normalized_json.get('core_memory_module')
+                evaluation_snapshot = {
+                    '評分': normalized_json.get('評分'),
+                    '內容評價': normalized_json.get('內容評價'),
+                    '扣分原因': normalized_json.get('扣分原因'),
+                    '改進建議': normalized_json.get('改進建議')
+                }
+                evaluation_snapshot = {k: v for k, v in evaluation_snapshot.items() if v is not None}
+                result.memory_snapshot = memory_snapshot
+                result.evaluation_snapshot = evaluation_snapshot
+
+            result.ai_response_json = normalized_json if normalized_json else None
+
             logger.info("Step 2: 解析 AI 回應...")
             try:
-                if json_data:
+                if normalized_json:
                     logger.info("使用 JSON 模式解析")
-                    project = CodeProcessor.parse_json_response(json_data)
+                    project = CodeProcessor.parse_json_response(normalized_json)
                 else:
                     logger.info("嘗試從文本中提取 JSON")
                     try:
@@ -1781,8 +2730,10 @@ class ProcessManager:
                             json_str = json_str.replace('\\n', '\n')
                             json_str = json_str.replace('\\t', '\t')
                             potential_json = json.loads(json_str)
+                            if isinstance(potential_json, list):
+                                potential_json = potential_json[0] if potential_json else {}
                             project = CodeProcessor.parse_json_response(potential_json)
-                            result.ai_response_json = potential_json
+                            result.ai_response_json = potential_json or None
                             logger.info("成功從文本中提取並解析 JSON")
                         else:
                             raise ValueError("無法從回應中找到有效的JSON結構")
@@ -2055,12 +3006,21 @@ class ProcessManager:
                 result.output,
                 metadata={
                     'project_name': project.project_name,
-                    'files_count': len(project.files)
+                    'files_count': len(project.files),
+                    **({'memory_snapshot': result.memory_snapshot} if result.memory_snapshot else {}),
+                    **({'evaluation_snapshot': result.evaluation_snapshot} if result.evaluation_snapshot else {})
                 },
                 terminal_output=result.terminal_output,
                 usage_metadata=usage_metadata  # ⭐ 直接傳遞 usage_metadata
             )
-            
+
+            if result.memory_snapshot or result.evaluation_snapshot:
+                ConversationManager.update_memory_state(
+                    final_project_dir,
+                    result.memory_snapshot,
+                    result.evaluation_snapshot
+                )
+
         except Exception as e:
             result.error = str(e)
             logger.error(f"處理流程失敗: {e}")
@@ -2189,7 +3149,9 @@ def load_project():
             'conversation': {
                 'messages': messages_data,
                 'created_at': conversation.created_at,
-                'updated_at': conversation.updated_at
+                'updated_at': conversation.updated_at,
+                'memory_snapshot': conversation.memory_snapshot,
+                'evaluation_snapshot': conversation.evaluation_snapshot
             }
         })
         
@@ -2229,7 +3191,9 @@ def get_conversation(project_dir):
                 'project_name': conversation.project_name,
                 'messages': messages_data,
                 'created_at': conversation.created_at,
-                'updated_at': conversation.updated_at
+                'updated_at': conversation.updated_at,
+                'memory_snapshot': conversation.memory_snapshot,
+                'evaluation_snapshot': conversation.evaluation_snapshot
             }
         })
     except Exception as e:
@@ -2287,12 +3251,15 @@ def run_process():
         
         folder_path = data.get('folder_path')
         prompt = data.get('prompt')
+        display_prompt = data.get('display_prompt')
+        memory_context = data.get('memory_context')
         config_data = data.get('config', {})
         files = data.get('files', [])
         is_iteration = data.get('is_iteration', False)
         attach_screenshot = data.get('attach_screenshot', False)
         attach_terminal = data.get('attach_terminal', False)
-        
+        attach_diagnostics = data.get('attach_diagnostics', False)
+
         if not all([folder_path, prompt]):
             return jsonify({
                 'success': False,
@@ -2309,9 +3276,12 @@ def run_process():
             files,
             is_iteration,
             attach_screenshot,
-            attach_terminal
+            attach_terminal,
+            attach_diagnostics,
+            user_visible_prompt=display_prompt,
+            memory_context=memory_context
         )
-        
+
         response_data = {
             'success': result.success,
             'output': result.output,
@@ -2324,7 +3294,12 @@ def run_process():
             'screenshots': result.screenshots,
             'is_iteration': result.is_iteration,
             'usage_metadata': result.usage_metadata,
-            'terminal_output': result.terminal_output
+            'terminal_output': result.terminal_output,
+            'memory_snapshot': result.memory_snapshot,
+            'evaluation_snapshot': result.evaluation_snapshot,
+            'diagnostics': result.diagnostics,
+            'diagnostics_prompt': result.diagnostics_prompt,
+            'attached_terminal': result.attached_terminal_snapshot
         }
         
         if result.project_data:
