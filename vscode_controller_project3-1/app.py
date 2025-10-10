@@ -211,6 +211,9 @@ class ProcessResult:
     is_iteration: bool = False
     usage_metadata: Optional[Dict] = None
     terminal_output: str = ""
+    evaluation_summary: Optional[Dict[str, Any]] = None
+    memory_module: Optional[Dict[str, Any]] = None
+    improvement_suggestion: Optional[str] = None
 
 # ============================================
 # JSON Schema 定義 - 繁體中文化
@@ -218,7 +221,23 @@ class ProcessResult:
 
 def get_json_schema():
     """獲取 Gemini API 的 JSON Schema"""
-    return {
+    core_goal_structure = {
+        "type": "array",
+        "minItems": 4,
+        "items": {
+            "type": "object",
+            "properties": {
+                "步驟": {"type": "integer", "description": "步驟編號"},
+                "任務": {"type": "string", "description": "具體任務描述"},
+                "狀態": {"type": "string", "enum": ["未開始", "進行中", "已完成"], "description": "任務狀態"},
+                "是否為當前任務": {"type": "boolean", "description": "是否為當前優先任務"}
+            },
+            "required": ["步驟", "任務", "狀態", "是否為當前任務"]
+        },
+        "description": "核心專案目標的分步清單,至少包含四項"
+    }
+
+    schema_object = {
         "type": "object",
         "properties": {
             "project_name": {"type": "string", "description": "專案名稱"},
@@ -247,115 +266,101 @@ def get_json_schema():
                         "is_web_app": {"type": "boolean", "description": "是否為網頁應用"},
                         "can_open_standalone": {"type": "boolean", "description": "主程式是否能自動開啟獨立瀏覽器視窗"},
                         "server_address": {"type": ["string", "null"], "description": "伺服器地址(如 http://localhost:5000)"},
-                        "web_title": {"type": ["string", "null"], "description": "網頁標題"}
-                    },
-                    "required": ["filename", "filetype", "code", "opens_window"]
-                }
+                    "web_title": {"type": ["string", "null"], "description": "網頁標題"}
+                },
+                "required": ["filename", "filetype", "code", "opens_window"]
+            }
+            },
+            "評分": {"type": ["integer", "null"], "minimum": 0, "maximum": 100, "description": "0-100 的品質評分"},
+            "內容評價": {"type": "string", "description": "200 字內的回應品質與規則遵守評價"},
+            "扣分原因": {"type": "string", "description": "扣分原因，無則填無"},
+            "改進建議": {"type": "string", "description": "下次回應的改進方向"},
+            "核心記憶模塊": {
+                "type": "object",
+                "properties": {
+                    "專案總結": {"type": "string", "description": "當前或上一段對話核心內容總結"},
+                    "短期記憶": {"type": "string", "description": "與近期任務直接相關的重要資訊"},
+                    "長期記憶": {"type": "string", "description": "專案長期背景或重要約束"},
+                    "專案目標": core_goal_structure
+                },
+                "required": ["專案總結", "短期記憶", "長期記憶", "專案目標"]
             }
         },
-        "required": ["project_name", "description", "files"]
+        "required": [
+            "project_name",
+            "description",
+            "files",
+            "評分",
+            "內容評價",
+            "扣分原因",
+            "改進建議",
+            "核心記憶模塊"
+        ]
+    }
+
+    return {
+        "anyOf": [
+            schema_object,
+            {"type": "array", "items": schema_object}
+        ]
     }
 
 def get_json_system_instruction():
-    """獲取 JSON 模式的系統指令 - 繁體中文版 + Flask修復"""
-    return """你是一位專業的程式碼助手,能夠生成完整、可運行的專案程式碼。
+    """取得新版 JSON 系統指令,強制包含評分與記憶欄位"""
+    return """你是一名專業的繁體中文全端開發助手,每次回覆都必須輸出可直接運行的完整專案,並提供長短期記憶與自我評估。
 
-回應時,你必須輸出一個符合以下結構的有效 JSON 物件:
-{
-    "project_name": "描述性的專案名稱",
-    "description": "專案功能的簡要描述",
+輸出僅能是有效的 JSON,可以是單一物件或只含一個物件的陣列,結構需符合下列樣板:
+[
+  {
+    "project_name": "專案名稱",
+    "description": "專案功能摘要",
     "main_file": "main.py",
-    "setup_instructions": ["pip install package1", "pip install package2"],
-    "run_instructions": ["python main.py", "開啟瀏覽器前往 http://localhost:5000"],
+    "setup_instructions": ["pip install package1"],
+    "run_instructions": ["python main.py"],
     "files": [
-        {
-            "filename": "main.py",
-            "filetype": "python",
-            "code": "import flask\\n\\napp = flask.Flask(__name__)\\n\\n@app.route('/')\\ndef home():\\n    return 'Hello World'\\n\\nif __name__ == '__main__':\\n    app.run(host='0.0.0.0', port=5000)",
-            "opens_window": false,
-            "window_title": null,
-            "install_requirements": ["pip install flask"],
-            "dependencies": ["flask"],
-            "description": "主應用程式檔案",
-            "run_command": "python main.py",
-            "is_web_app": true,
-            "can_open_standalone": false,
-            "server_address": "http://localhost:5000",
-            "web_title": "我的網頁應用"
-        }
-    ]
-}
+      {
+        "filename": "main.py",
+        "filetype": "python",
+        "code": "import flask\\n...",
+        "opens_window": false,
+        "window_title": null,
+        "install_requirements": ["pip install flask"],
+        "dependencies": ["flask"],
+        "description": "檔案說明",
+        "run_command": "python main.py",
+        "is_web_app": true,
+        "can_open_standalone": false,
+        "server_address": "http://localhost:5000",
+        "web_title": "服務名稱"
+      }
+    ],
+    "評分": 0 至 100 的整數,
+    "內容評價": "200 字內的精簡評論",
+    "扣分原因": "若無扣分請填寫『無』",
+    "改進建議": "下一輪可採取的具體改善方向",
+    "核心記憶模塊": {
+      "專案總結": "提煉當前或上一輪對話的核心成果",
+      "短期記憶": "近幾輪對話中直接影響任務的關鍵資訊",
+      "長期記憶": "專案背景、核心目標或重要限制條件",
+      "專案目標": [
+        {"步驟": 1, "任務": "任務敘述", "狀態": "已完成", "是否為當前任務": false},
+        {"步驟": 2, "任務": "任務敘述", "狀態": "進行中", "是否為當前任務": true},
+        {"步驟": 3, "任務": "任務敘述", "狀態": "未開始", "是否為當前任務": false},
+        {"步驟": 4, "任務": "任務敘述", "狀態": "未開始", "是否為當前任務": false}
+      ]
+    }
+  }
+]
 
-重要格式要則:
-1. "code" 欄位必須包含正確格式化的程式碼,使用真實的換行符號和縮排
-2. 在 code 字串中使用實際的換行字元 (\\n) 和 Tab 字元 (\\t),不是文字上的 \\n 字串
-3. 程式碼必須是有效的 JSON 字串 - 正確跳脫引號
-4. 確保程式碼中的縮排正確保留
-5. 程式碼的每一行應該在 JSON 字串中獨立成行
+請嚴格遵守以下規範:
+1. 「評分」、「內容評價」、「扣分原因」、「改進建議」皆為必填欄位,若無扣分請填「無」。
+2. █▌核心記憶模塊 (Thinking Module) 中的「專案總結」、「短期記憶」、「長期記憶」不得留白; 「專案目標」至少列出四個步驟,並標註「是否為當前任務」。
+3. 僅能輸出 JSON,不得加入額外文字或 Markdown,程式碼字串中的換行請使用 \\n 表示。
+4. 所有 "code" 欄位必須填入完整、可直接執行的程式碼,禁止使用省略號或僅寫註解。
+5. Flask 專案禁止啟用 debug,啟動程式時請使用 app.run(host='0.0.0.0', port=5000); 其他框架亦需提供明確啟動指令。
+6. 若為網頁應用,請設定 "is_web_app": true,必要時附上 "server_address" 與 "web_title"; 只有在程式會自動開啟瀏覽器時,才將 "can_open_standalone" 設為 true。
 
-**CRITICAL Flask/Web Server 要則:**
-1. **絕對禁止使用 debug=True** - 這會導致在 subprocess 中運行時崩潰
-2. Flask 應用必須使用:`app.run(host='0.0.0.0', port=5000)` (不帶 debug 參數)
-3. Node.js/Express 應用也不要使用開發模式的熱重載
-4. 如果需要開發便利性,可以在代碼註釋中說明手動運行時可加 debug=True
-
-網頁應用要則:
-1. 對於 HTML 檔案或伺服器應用程式(Flask、Node.js 等),設定 "is_web_app": true
-2. 只有在你的程式碼包含自動開啟瀏覽器功能時,才設定 "can_open_standalone": true:
-   - Python: 使用 webbrowser.open() 或 Flask 加上 app.run(port=5000) + webbrowser
-   - Node.js: 使用 'open' 套件或類似工具
-   - HTML: 如果是可以直接開啟的獨立 HTML
-3. 如果 "can_open_standalone" 為 false 但 "is_web_app" 為 true,請提供:
-   - "server_address": 應用程式將運行的 URL(例如:"http://localhost:5000")
-   - "web_title": 網頁的標題
-4. 對於獨立的 HTML 檔案,將 opens_window 和 is_web_app 都設為 true
-5. 對於伺服器應用程式,控制器將處理開啟獨立瀏覽器視窗
-
-重要要則:
-1. 始終生成完整、可運行的程式碼 - 不要使用佔位符或省略號
-2. 對於 GUI 應用程式(pygame/tkinter),設定視窗標題以匹配專案名稱
-3. 對於網頁應用,確保 HTML 有適當的 <title> 標籤
-4. 包含所有必要的匯入和錯誤處理
-5. 正確指定檔案類型(python、javascript、html 等)
-6. 對於 GUI 應用程式或獨立 HTML 檔案,將 opens_window 設為 true
-7. 在 install_requirements 中列出所有套件安裝命令
-8. 為每個檔案提供清晰的描述
-9. 對於多檔案專案,確保檔案正確連結
-
-支持的檔案類型:
-python, javascript, html, css, typescript, java, cpp, c, go, rust, ruby, php, swift, kotlin, sql, shell, yaml, json, xml, markdown, text
-
-記住:
-- 只輸出有效的 JSON,不要有額外的文字或 markdown 格式
-- 確保程式碼正確格式化,縮排正確
-- 在程式碼字串中使用真實的換行符號,而不是 \\n 文字
-- 對於網頁應用,仔細考慮獨立瀏覽器視窗的能力
-- **Flask/Web 伺服器絕對不要使用 debug=True**
-
-對於 HTML + 後端專案的特別注意事項:
-1. 確保後端伺服器(Flask/Node.js)正確配置 CORS 和靜態檔案服務
-2. HTML 檔案應該正確引用後端 API 端點
-3. 提供完整的前後端連接測試程式碼
-4. 在 run_instructions 中明確說明:
-   - 先啟動後端伺服器
-   - 後端服務地址
-   - 前端如何訪問
-5. 對於需要同時運行前後端的專案:
-   - 後端檔案設定 is_web_app: true, can_open_standalone: false
-   - 提供準確的 server_address 和 web_title
-   - 確保後端程式碼包含適當的路由和 CORS 設定
-   - **後端絕對不要使用 debug=True**
-6. 測試程式碼應該驗證:
-   - 後端伺服器啟動成功
-   - API 端點可訪問
-   - 前後端數據交互正常
-
-Terminal 輸出和除錯資訊:
-1. 所有重要的執行步驟都應該有 print() 或 console.log() 輸出
-2. 包含適當的錯誤處理和錯誤訊息輸出
-3. 啟動時輸出服務地址和狀態資訊
-4. 對於網頁應用,輸出 "伺服器運行於: http://localhost:PORT"
-"""
+所有描述請使用繁體中文。"""
 
 # ============================================
 # 配置管理模塊
@@ -1122,6 +1127,9 @@ class CodeProcessor:
     def parse_json_response(json_data: Dict) -> ProjectOutput:
         """解析 JSON 格式的 AI 回應"""
         try:
+            if isinstance(json_data, list):
+                json_data = json_data[0] if json_data else {}
+
             files = []
             for file_data in json_data.get('files', []):
                 code = file_data.get('code', '')
@@ -1667,16 +1675,29 @@ class ProcessManager:
         result = ProcessResult(success=False, is_iteration=is_iteration)
         
         try:
+            incoming_files = files or []
+            user_uploads = [dict(f) for f in incoming_files]
+            files = list(user_uploads)
+            display_attachments = []
+
+            for file_data in user_uploads:
+                attachment_name = file_data.get('name') or file_data.get('filename')
+                if not attachment_name:
+                    continue
+                attachment_type = file_data.get('type') or file_data.get('filetype') or '未指定'
+                display_attachments.append({
+                    'name': attachment_name,
+                    'type': attachment_type
+                })
+
             if is_iteration:
                 logger.info("迭代模式:自動載入專案所有檔案")
                 project_files = ProjectManager.load_project_files(folder_path)
-                
-                if not files:
-                    files = []
-                
-                files.extend(project_files)
-                logger.info(f"已附加 {len(project_files)} 個專案檔案")
-            
+
+                if project_files:
+                    files.extend(project_files)
+                    logger.info(f"已附加 {len(project_files)} 個專案檔案")
+
             terminal_output = None
             if attach_terminal:
                 terminal_output = ProgramManager.get_all_terminal_output()
@@ -1685,14 +1706,6 @@ class ProcessManager:
                     result.terminal_output = terminal_output
             
             # ⭐ 修復:在正確的時機保存用戶消息
-            ConversationManager.add_message(
-                folder_path,
-                'user',
-                prompt,
-                files=[{'name': f.get('name'), 'type': f.get('type')} for f in (files or [])],
-                terminal_output=terminal_output
-            )
-            
             if is_iteration and attach_screenshot:
                 project_info = ProjectManager.load_project_info(folder_path)
                 if project_info:
@@ -1747,12 +1760,27 @@ class ProcessManager:
                         except Exception as e:
                             logger.error(f"讀取截圖失敗: {e}")
                     
-                    if not files:
-                        files = []
-                    files.extend(screenshot_files)
-                    
+                    if screenshot_files:
+                        files.extend(screenshot_files)
+                        for shot in screenshot_files:
+                            shot_name = shot.get('name')
+                            if not shot_name:
+                                continue
+                            display_attachments.append({
+                                'name': shot_name,
+                                'type': shot.get('type', 'image/png')
+                            })
+
                     result.screenshots = [s['filename'] for s in screenshots]
-            
+
+            ConversationManager.add_message(
+                folder_path,
+                'user',
+                prompt,
+                files=display_attachments or None,
+                terminal_output=terminal_output
+            )
+
             logger.info("Step 1: 呼叫 Gemini AI...")
             if files:
                 logger.info(f"包含 {len(files)} 個檔案")
@@ -1763,14 +1791,18 @@ class ProcessManager:
                 prompt, config, files, terminal_output
             )
             result.ai_response = ai_response
-            result.ai_response_json = json_data
+            normalized_json = None
+            if json_data:
+                normalized_json = json_data[0] if isinstance(json_data, list) else json_data
+            result.ai_response_json = normalized_json or json_data
             result.usage_metadata = usage_metadata
-            
+
             logger.info("Step 2: 解析 AI 回應...")
             try:
-                if json_data:
+                target_json = normalized_json or json_data
+                if target_json:
                     logger.info("使用 JSON 模式解析")
-                    project = CodeProcessor.parse_json_response(json_data)
+                    project = CodeProcessor.parse_json_response(target_json)
                 else:
                     logger.info("嘗試從文本中提取 JSON")
                     try:
@@ -1780,9 +1812,12 @@ class ProcessManager:
                             json_str = ai_response[json_start:json_end]
                             json_str = json_str.replace('\\n', '\n')
                             json_str = json_str.replace('\\t', '\t')
+                            json_str = json_str.replace('\\"', '"')
+                            json_str = json_str.replace("\\'", "'")
                             potential_json = json.loads(json_str)
                             project = CodeProcessor.parse_json_response(potential_json)
                             result.ai_response_json = potential_json
+                            target_json = potential_json
                             logger.info("成功從文本中提取並解析 JSON")
                         else:
                             raise ValueError("無法從回應中找到有效的JSON結構")
@@ -1790,7 +1825,23 @@ class ProcessManager:
                         raise ValueError(f"JSON解析失敗: {e}")
                 
                 result.project_data = project
-                
+
+                if target_json and isinstance(target_json, dict):
+                    evaluation_summary = {
+                        '評分': target_json.get('評分'),
+                        '內容評價': target_json.get('內容評價'),
+                        '扣分原因': target_json.get('扣分原因'),
+                        '改進建議': target_json.get('改進建議')
+                    }
+
+                    if any(v is not None for v in evaluation_summary.values()):
+                        result.evaluation_summary = evaluation_summary
+                        result.improvement_suggestion = evaluation_summary.get('改進建議')
+
+                    memory_module = target_json.get('核心記憶模塊')
+                    if isinstance(memory_module, dict):
+                        result.memory_module = memory_module
+
             except (ValueError, KeyError) as parse_error:
                 logger.error(f"解析 AI 回應失敗: {parse_error}")
                 result.error = f"解析失敗: {str(parse_error)}"
@@ -2049,15 +2100,23 @@ class ProcessManager:
             result.success = True
             
             # ⭐ 關鍵修復:使用最終路徑和正確的 usage_metadata 保存AI回應
+            assistant_metadata = {
+                'project_name': project.project_name,
+                'files_count': len(project.files)
+            }
+            if result.evaluation_summary:
+                assistant_metadata['evaluation_summary'] = result.evaluation_summary
+            if result.memory_module:
+                assistant_metadata['memory_module'] = result.memory_module
+            if result.improvement_suggestion:
+                assistant_metadata['improvement_suggestion'] = result.improvement_suggestion
+
             ConversationManager.add_message(
                 final_project_dir,  # ✅ 使用最終專案路徑
                 'assistant',
                 result.output,
-                metadata={
-                    'project_name': project.project_name,
-                    'files_count': len(project.files)
-                },
-                terminal_output=result.terminal_output,
+                metadata=assistant_metadata,
+                terminal_output=None,
                 usage_metadata=usage_metadata  # ⭐ 直接傳遞 usage_metadata
             )
             
@@ -2326,7 +2385,14 @@ def run_process():
             'usage_metadata': result.usage_metadata,
             'terminal_output': result.terminal_output
         }
-        
+
+        if result.evaluation_summary:
+            response_data['evaluation'] = result.evaluation_summary
+        if result.memory_module:
+            response_data['memory_module'] = result.memory_module
+        if result.improvement_suggestion:
+            response_data['improvement_suggestion'] = result.improvement_suggestion
+
         if result.project_data:
             response_data['project'] = {
                 'name': result.project_data.project_name,
