@@ -835,6 +835,44 @@ body {
     padding: 20px;
 }
 
+.memory-panel-wrapper {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    position: relative;
+    flex-shrink: 0;
+    min-width: 0;
+}
+
+.memory-panel-wrapper.collapsed {
+    width: auto;
+}
+
+.memory-expand-btn {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    border: 1px solid var(--border-light);
+    background: var(--bg-primary);
+    box-shadow: var(--shadow-sm);
+    cursor: pointer;
+    transition: background 0.2s ease, border-color 0.2s ease;
+    position: sticky;
+    top: 90px;
+    z-index: 2;
+}
+
+.memory-expand-btn.visible {
+    display: flex;
+}
+
+.memory-expand-btn:hover {
+    background: var(--bg-secondary);
+}
+
 .memory-panel {
     width: 320px;
     background: var(--bg-primary);
@@ -847,11 +885,13 @@ body {
     top: 90px;
     max-height: calc(100vh - 140px);
     overflow: hidden;
-    transition: box-shadow 0.2s ease, border-color 0.2s ease;
+    transition: transform 0.3s ease, opacity 0.3s ease, box-shadow 0.2s ease, border-color 0.2s ease;
 }
 
 .memory-panel.collapsed {
-    border-color: var(--border-light);
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(24px);
 }
 
 .memory-panel-header {
@@ -907,19 +947,12 @@ body {
     transform: rotate(180deg);
 }
 
-.memory-panel.collapsed .memory-panel-body {
-    max-height: 0;
-    padding: 0 20px;
-    overflow: hidden;
-}
-
 .memory-panel-body {
     padding: 16px 20px 20px 20px;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
     gap: 16px;
-    transition: max-height 0.3s ease, padding 0.3s ease;
 }
 
 .memory-section h4 {
@@ -929,11 +962,33 @@ body {
     letter-spacing: 0.4px;
 }
 
-.memory-text {
+.memory-list {
+    list-style: none;
+    padding-left: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.memory-list .memory-placeholder {
+    padding-left: 0;
+}
+
+.memory-list-item {
     font-size: 13px;
     line-height: 1.6;
     color: var(--text-primary);
-    white-space: pre-wrap;
+    position: relative;
+    padding-left: 18px;
+}
+
+.memory-list-item::before {
+    content: '•';
+    position: absolute;
+    left: 0;
+    color: var(--primary-color);
+    font-weight: 600;
 }
 
 .memory-evaluation-list {
@@ -968,6 +1023,13 @@ body {
     font-size: 12px;
     color: var(--text-tertiary);
     padding: 10px 0;
+}
+
+.memory-panel-wrapper.collapsed .memory-panel {
+    position: absolute;
+    top: 0;
+    right: 0;
+    visibility: hidden;
 }
 
 .memory-goals-list {
@@ -1140,6 +1202,99 @@ body {
     font-size: 12px;
     line-height: 1.6;
     color: var(--text-primary);
+    white-space: pre-wrap;
+}
+
+.syntax-report {
+    border: 1px solid var(--border-light);
+    border-radius: 10px;
+    margin-top: 12px;
+    background: var(--bg-secondary);
+    padding: 0 12px 12px 12px;
+}
+
+.syntax-report > summary {
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 12px 0;
+    color: var(--text-secondary);
+    list-style: none;
+}
+
+.syntax-report[open] > summary {
+    color: var(--primary-color);
+}
+
+.syntax-report-body {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.syntax-report-item {
+    background: var(--bg-primary);
+    border-radius: 8px;
+    padding: 10px 12px;
+    border: 1px solid var(--border-light);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.syntax-report-item-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.syntax-report-file {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.syntax-report-status {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 10px;
+    border-radius: 999px;
+}
+
+.syntax-report-status.passed {
+    background: #dcfce7;
+    color: #047857;
+}
+
+.syntax-report-status.failed {
+    background: #fee2e2;
+    color: #b91c1c;
+}
+
+.syntax-report-status.warning {
+    background: #fef3c7;
+    color: #b45309;
+}
+
+.syntax-report-status.skipped {
+    background: #e0f2fe;
+    color: #0369a1;
+}
+
+.syntax-report-message {
+    font-size: 13px;
+    color: var(--text-primary);
+    line-height: 1.5;
+}
+
+.syntax-report-detail {
+    font-size: 12px;
+    line-height: 1.5;
+    background: var(--bg-secondary);
+    border-radius: 6px;
+    padding: 8px 10px;
+    border: 1px dashed var(--border-light);
     white-space: pre-wrap;
 }
 

@@ -15,6 +15,7 @@ let sidebarCollapsed = false;
 let MODEL_LIMITS = {};
 let projectMemoryState = {};
 let autoAttachMemory = true;
+let autoSyntaxCheck = false;
 
 // ============================================
 // Loading Overlay 控制 - 修復版
@@ -54,6 +55,10 @@ window.addEventListener('DOMContentLoaded', () => {
     const memoryMenuItem = document.getElementById('memoryMenuItem');
     if (memoryMenuItem) {
         memoryMenuItem.classList.add('active');
+    }
+    const syntaxMenuItem = document.getElementById('syntaxMenuItem');
+    if (syntaxMenuItem && autoSyntaxCheck) {
+        syntaxMenuItem.classList.add('active');
     }
     updateMemoryMenuHint();
     renderMemoryPanel();
@@ -303,6 +308,21 @@ function toggleAutoAttachMemory() {
     togglePlusMenu();
 }
 
+function toggleSyntaxCheck() {
+    autoSyntaxCheck = !autoSyntaxCheck;
+    const menuItem = document.getElementById('syntaxMenuItem');
+    if (menuItem) {
+        if (autoSyntaxCheck) {
+            menuItem.classList.add('active');
+            showNotification('已啟用語法偵錯報告', 'success');
+        } else {
+            menuItem.classList.remove('active');
+            showNotification('已關閉語法偵錯報告', 'info');
+        }
+    }
+    togglePlusMenu();
+}
+
 function getCurrentMemoryState() {
     if (!currentProjectDir) return null;
     return projectMemoryState[currentProjectDir] || null;
@@ -344,30 +364,106 @@ function updateMemoryMenuHint() {
     }
 }
 
+function updateMemoryList(listEl, text, emptyMessage) {
+    if (!listEl) return;
+
+    listEl.innerHTML = '';
+    const raw = typeof text === 'string' ? text.trim() : '';
+
+    if (!raw) {
+        const placeholder = document.createElement('li');
+        placeholder.className = 'memory-placeholder';
+        placeholder.textContent = emptyMessage;
+        listEl.appendChild(placeholder);
+        return;
+    }
+
+    const segments = raw.split(/\r?\n+/).map(line => line.trim()).filter(Boolean);
+
+    if (segments.length === 0) {
+        const placeholder = document.createElement('li');
+        placeholder.className = 'memory-placeholder';
+        placeholder.textContent = emptyMessage;
+        listEl.appendChild(placeholder);
+        return;
+    }
+
+    segments.forEach(segment => {
+        let cleaned = segment.replace(/^[•*\-]\s*/, '');
+        cleaned = cleaned.trim();
+        if (!cleaned || cleaned === '無') {
+            return;
+        }
+        const item = document.createElement('li');
+        item.className = 'memory-list-item';
+        item.textContent = cleaned;
+        listEl.appendChild(item);
+    });
+
+    if (!listEl.childElementCount) {
+        const placeholder = document.createElement('li');
+        placeholder.className = 'memory-placeholder';
+        placeholder.textContent = emptyMessage;
+        listEl.appendChild(placeholder);
+    }
+}
+
 function renderMemoryPanel() {
     const panel = document.getElementById('memoryPanel');
+    const wrapper = document.getElementById('memoryPanelWrapper');
     const body = document.getElementById('memoryPanelBody');
     const scoreEl = document.getElementById('memoryScoreDisplay');
     const projectLabel = document.getElementById('memoryProjectLabel');
     const evaluationList = document.getElementById('memoryEvaluationList');
-    const summaryBox = document.getElementById('memorySummaryBox');
-    const stmBox = document.getElementById('memorySTMBox');
-    const ltmBox = document.getElementById('memoryLTMBox');
+    const summaryList = document.getElementById('memorySummaryList');
+    const stmList = document.getElementById('memorySTMList');
+    const ltmList = document.getElementById('memoryLTMList');
     const goalsList = document.getElementById('memoryGoalsList');
+    const expandBtn = document.getElementById('memoryExpandBtn');
+    const collapseBtn = document.getElementById('memoryCollapseBtn');
 
-    if (!panel || !body || !scoreEl || !projectLabel || !evaluationList || !summaryBox || !stmBox || !ltmBox || !goalsList) {
+    if (!panel || !body || !scoreEl || !projectLabel || !evaluationList || !summaryList || !stmList || !ltmList || !goalsList) {
         return;
     }
 
     if (!currentProjectDir) {
         panel.style.display = 'none';
+        if (wrapper) {
+            wrapper.style.display = 'none';
+            wrapper.classList.remove('collapsed');
+        }
+        if (expandBtn) {
+            expandBtn.classList.remove('visible');
+            expandBtn.setAttribute('aria-hidden', 'true');
+        }
+        if (collapseBtn) {
+            collapseBtn.setAttribute('aria-expanded', 'true');
+        }
         body.style.maxHeight = 'none';
         return;
     }
 
     panel.style.display = 'flex';
+    if (wrapper) {
+        wrapper.style.display = 'flex';
+    }
     body.style.maxHeight = 'none';
     projectLabel.textContent = currentProject?.name || '未命名專案';
+
+    if (expandBtn) {
+        const isCollapsed = panel.classList.contains('collapsed');
+        if (isCollapsed) {
+            expandBtn.classList.add('visible');
+            expandBtn.setAttribute('aria-hidden', 'false');
+        } else {
+            expandBtn.classList.remove('visible');
+            expandBtn.setAttribute('aria-hidden', 'true');
+        }
+    }
+
+    if (collapseBtn) {
+        collapseBtn.setAttribute('aria-expanded', String(!panel.classList.contains('collapsed')));
+    }
 
     const state = getCurrentMemoryState();
     const evaluation = state?.evaluation || {};
@@ -408,9 +504,9 @@ function renderMemoryPanel() {
         evaluationList.appendChild(placeholder);
     }
 
-    summaryBox.textContent = memory['專案總結'] || '尚未建立專案總結';
-    stmBox.textContent = memory['短期記憶'] || '尚未累積短期記憶';
-    ltmBox.textContent = memory['長期記憶'] || '尚未建立長期記憶';
+    updateMemoryList(summaryList, memory['專案總結'], '尚未建立專案總結');
+    updateMemoryList(stmList, memory['短期記憶'], '尚未累積短期記憶');
+    updateMemoryList(ltmList, memory['長期記憶'], '尚未建立長期記憶');
 
     goalsList.innerHTML = '';
     const goals = Array.isArray(memory['專案目標']) ? memory['專案目標'] : [];
@@ -462,27 +558,37 @@ function renderMemoryPanel() {
     updateMemoryMenuHint();
 }
 
-function toggleMemoryPanel() {
+function toggleMemoryPanel(expand = null) {
     const panel = document.getElementById('memoryPanel');
-    const body = document.getElementById('memoryPanelBody');
-    const btn = document.getElementById('memoryCollapseBtn');
+    const wrapper = document.getElementById('memoryPanelWrapper');
+    const collapseBtn = document.getElementById('memoryCollapseBtn');
+    const expandBtn = document.getElementById('memoryExpandBtn');
 
-    if (!panel || !body || !btn) return;
+    if (!panel || !wrapper || !collapseBtn || !expandBtn) return;
 
-    body.style.maxHeight = `${body.scrollHeight}px`;
-    void body.offsetHeight;
-    panel.classList.toggle('collapsed');
-    if (panel.classList.contains('collapsed')) {
-        btn.classList.add('collapsed');
-        body.style.maxHeight = '0px';
+    let shouldCollapse;
+    if (expand === true) {
+        shouldCollapse = false;
+    } else if (expand === false) {
+        shouldCollapse = true;
     } else {
-        btn.classList.remove('collapsed');
-        body.style.maxHeight = `${body.scrollHeight}px`;
-        setTimeout(() => {
-            if (!panel.classList.contains('collapsed')) {
-                body.style.maxHeight = 'none';
-            }
-        }, 300);
+        shouldCollapse = !wrapper.classList.contains('collapsed');
+    }
+
+    wrapper.classList.toggle('collapsed', shouldCollapse);
+    panel.classList.toggle('collapsed', shouldCollapse);
+    collapseBtn.classList.toggle('collapsed', shouldCollapse);
+    collapseBtn.setAttribute('aria-expanded', String(!shouldCollapse));
+
+    if (shouldCollapse) {
+        expandBtn.classList.add('visible');
+        expandBtn.setAttribute('aria-hidden', 'false');
+    } else {
+        expandBtn.classList.remove('visible');
+        expandBtn.setAttribute('aria-hidden', 'true');
+        if (typeof collapseBtn.focus === 'function') {
+            collapseBtn.focus({ preventScroll: true });
+        }
     }
 }
 
@@ -605,11 +711,16 @@ async function handleSubmit() {
                 files: uploadedFiles,
                 is_iteration: isIterationMode,
                 attach_screenshot: isIterationMode && autoScreenshot,
-                attach_terminal: attachTerminal
+                attach_terminal: attachTerminal,
+                attach_syntax_report: autoSyntaxCheck
             })
         });
 
         const result = await response.json();
+
+        if (Array.isArray(result.syntax_report) && result.syntax_report.length > 0) {
+            appendSyntaxReportToLastUserMessage(result.syntax_report);
+        }
 
         if (result.success) {
             addMessage('assistant', result.output, result.usage_metadata, result.terminal_output, [], {
@@ -665,9 +776,107 @@ async function handleSubmit() {
     }
 }
 
+function createSyntaxReportElement(report) {
+    if (!Array.isArray(report) || report.length === 0) {
+        return null;
+    }
+
+    const details = document.createElement('details');
+    details.className = 'syntax-report';
+    details.open = true;
+
+    const summary = document.createElement('summary');
+    summary.textContent = '語法偵錯報告';
+    details.appendChild(summary);
+
+    const body = document.createElement('div');
+    body.className = 'syntax-report-body';
+
+    const statusLabelMap = {
+        passed: '通過',
+        failed: '錯誤',
+        warning: '警示',
+        skipped: '略過'
+    };
+
+    report.forEach((entry) => {
+        if (!entry) return;
+        const item = document.createElement('div');
+        item.className = 'syntax-report-item';
+
+        const topRow = document.createElement('div');
+        topRow.className = 'syntax-report-item-top';
+
+        const fileLabel = document.createElement('span');
+        fileLabel.className = 'syntax-report-file';
+        const fileName = typeof entry.file === 'string' && entry.file.trim() ? entry.file.trim() : '未命名檔案';
+        const language = typeof entry.language === 'string' && entry.language.trim() ? entry.language.trim() : '未知語言';
+        fileLabel.textContent = `${fileName} · ${language}`;
+
+        const statusKey = typeof entry.status === 'string' ? entry.status : 'skipped';
+        const status = document.createElement('span');
+        status.className = `syntax-report-status ${statusKey}`;
+        status.textContent = statusLabelMap[statusKey] || statusKey.toUpperCase();
+
+        topRow.append(fileLabel, status);
+        item.appendChild(topRow);
+
+        if (entry.message) {
+            const messageRow = document.createElement('div');
+            messageRow.className = 'syntax-report-message';
+            messageRow.textContent = String(entry.message);
+            item.appendChild(messageRow);
+        }
+
+        if (entry.details) {
+            const detailRow = document.createElement('pre');
+            detailRow.className = 'syntax-report-detail selectable';
+            const detailText = String(entry.details);
+            const trimmed = detailText.length > 600 ? `${detailText.slice(0, 597)}…` : detailText;
+            detailRow.textContent = trimmed;
+            item.appendChild(detailRow);
+        }
+
+        body.appendChild(item);
+    });
+
+    if (!body.childElementCount) {
+        return null;
+    }
+
+    details.appendChild(body);
+    return details;
+}
+
+function attachSyntaxReportToMessage(messageEl, report) {
+    if (!messageEl) return;
+    const existing = messageEl.querySelector('.syntax-report');
+    if (existing) {
+        existing.remove();
+    }
+
+    const element = createSyntaxReportElement(report);
+    if (element) {
+        messageEl.appendChild(element);
+    }
+}
+
+function appendSyntaxReportToLastUserMessage(report) {
+    const messages = document.querySelectorAll('.result-message.user');
+    if (!messages.length) return;
+    const last = messages[messages.length - 1];
+    attachSyntaxReportToMessage(last, report);
+}
+
 function addMessage(role, content, usageMetadata = null, terminalOutput = null, attachments = [], metadata = {}) {
     const container = document.getElementById('resultsContainer');
     if (!container) return;
+
+    container.style.display = 'block';
+    const emptyState = document.getElementById('emptyState');
+    if (emptyState) {
+        emptyState.style.display = 'none';
+    }
 
     const message = document.createElement('div');
     message.className = `result-message ${role} selectable`;
@@ -777,6 +986,10 @@ function addMessage(role, content, usageMetadata = null, terminalOutput = null, 
             evaluationBox.append(scoreRow, suggestionRow);
             message.appendChild(evaluationBox);
         }
+    }
+
+    if (metadata && metadata.syntax_report) {
+        attachSyntaxReportToMessage(message, metadata.syntax_report);
     }
 
     if (terminalOutput && terminalOutput.trim()) {
@@ -1080,7 +1293,12 @@ async function loadExistingProject(projectDir) {
                 const container = document.getElementById('resultsContainer');
                 if (container) {
                     container.innerHTML = '';
-                    
+                    container.style.display = 'block';
+                    const emptyState = document.getElementById('emptyState');
+                    if (emptyState) {
+                        emptyState.style.display = 'none';
+                    }
+
                     for (const msg of result.conversation.messages) {
                         const rawMetadata = msg.metadata || {};
                         const normalizedMetadata = {

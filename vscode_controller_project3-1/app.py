@@ -14,9 +14,12 @@ import threading
 import time
 import re
 import json
+import ast
 import platform
 import logging
 import queue
+import tempfile
+import shutil
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
 from pathlib import Path
@@ -40,6 +43,7 @@ import mss.tools
 from PIL import Image
 import io
 import base64
+from xml.etree import ElementTree as ET
 
 # Optional Google Cloud Auth support
 try:
@@ -215,6 +219,7 @@ class ProcessResult:
     terminal_output: str = ""
     memory_snapshot: Optional[Dict[str, Any]] = None
     evaluation_snapshot: Optional[Dict[str, Any]] = None
+    syntax_report: List[Dict[str, Any]] = field(default_factory=list)
 
 # ============================================
 # JSON Schema 定義 - 繁體中文化
@@ -308,8 +313,8 @@ def get_json_system_instruction():
   "改進建議": "下一次回應可改進的方向,若無請填『無』",
   "核心記憶模塊": {
       "專案總結": "摘要最新對話或專案重點",
-      "短期記憶": "列出最近幾輪對話中的關鍵資訊",
-      "長期記憶": "整理專案背景、核心目標或重要限制",
+      "短期記憶": "列出最近幾輪對話中的關鍵資訊，請使用『• 』符號開頭的多行條列描述",
+      "長期記憶": "整理專案背景、核心目標或重要限制，同樣以條列式呈現，避免單段落敘述",
       "專案目標": [
           {"步驟": 1, "任務": "...", "狀態": "已完成/進行中/未開始", "是否為當前任務": true/false},
           {"步驟": 2, ... 至少四個項目 }
@@ -350,7 +355,8 @@ def get_json_system_instruction():
 6. 多檔案專案需確保相依檔案之間的匯入路徑正確,不得遺漏必要資源。
 7. 所有字串請使用繁體中文說明,除非程式語言語法或函式庫名稱要求英文。
 8. 專案目標需依進度更新狀態,並清楚標示當前主要任務。
-9. 評分、扣分原因、改進建議需與本次回覆內容一致,不得空泛。
+9. 評分、扣分原因、改進建議需與本次回覆內容一致,不得空泛,內容評價需兼顧規則遵守與品質分析。
+10. 若提示詞中包含「【語法偵錯報告】」區塊,請優先逐項檢視並修正報告指出的錯誤與警示,完成後再處理其他需求。
 
 請以這個全新結構回覆,不要沿用舊版模板或刪減任何必要欄位。"""
 
@@ -730,9 +736,9 @@ class GeminiAI:
             raise ValueError(f"不支持的連接模式: {config.connection_method}")
     
     @staticmethod
-    def generate_content(prompt: str, config: AIConfig, files: List[Dict] = None, 
-                        terminal_output: str = None) -> Tuple[str, Optional[Dict], Optional[Dict]]:
-        """呼叫 Gemini API 生成內容(支持檔案和Terminal輸出)"""
+    def generate_content(prompt: str, config: AIConfig, files: List[Dict] = None,
+                        terminal_output: str = None, syntax_report_text: str = None) -> Tuple[str, Optional[Dict], Optional[Dict]]:
+        """呼叫 Gemini API 生成內容(支持檔案、Terminal 與語法偵錯報告)"""
         try:
             GeminiAI.configure(config)
             
@@ -783,7 +789,11 @@ class GeminiAI:
                 terminal_part = f"\n=== 程式執行輸出 (Terminal Output) ===\n{terminal_output}\n=== 輸出結束 ===\n"
                 content_parts.append(terminal_part)
                 logger.info("已添加Terminal輸出到提示詞")
-            
+
+            if syntax_report_text:
+                content_parts.append(syntax_report_text)
+                logger.info("已附加語法偵錯摘要到提示詞")
+
             if files:
                 for file_data in files:
                     file_type = file_data.get('type', '')
@@ -1658,8 +1668,309 @@ class ProgramManager:
             logger.error(f"開啟獨立瀏覽器失敗: {e}")
             import webbrowser
             webbrowser.open_new(url)
-        
+
         return browser_process
+
+# ============================================
+# 語法偵錯模塊
+# ============================================
+
+class SyntaxChecker:
+    """多語言語法偵錯輔助工具"""
+
+    LANGUAGE_RULES = {
+        '.py': ('Python', 'python'),
+        '.js': ('JavaScript', 'javascript'),
+        '.jsx': ('JavaScript (JSX)', 'javascript'),
+        '.mjs': ('JavaScript (ESM)', 'javascript'),
+        '.ts': ('TypeScript', 'typescript'),
+        '.tsx': ('TypeScript (TSX)', 'typescript'),
+        '.json': ('JSON', 'json'),
+        '.yaml': ('YAML', 'yaml'),
+        '.yml': ('YAML', 'yaml'),
+        '.toml': ('TOML', 'toml'),
+        '.xml': ('XML', 'xml'),
+        '.html': ('HTML', 'html'),
+        '.htm': ('HTML', 'html'),
+        '.vue': ('Vue', 'html'),
+        '.css': ('CSS', 'css')
+    }
+
+    HTML_VOID_TAGS = {
+        'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'keygen',
+        'link', 'meta', 'param', 'source', 'track', 'wbr'
+    }
+
+    MAX_TEXT_LENGTH = 500_000
+
+    @classmethod
+    def generate_report(cls, files: List[Dict]) -> List[Dict[str, Any]]:
+        """根據檔案列表產生語法偵錯結果"""
+        report: List[Dict[str, Any]] = []
+        if not files:
+            return report
+
+        seen_files = set()
+
+        for file_data in files:
+            file_name = file_data.get('name')
+            if not file_name or file_name in seen_files:
+                continue
+
+            seen_files.add(file_name)
+            entry = cls._analyze_file(file_name, file_data)
+            if entry:
+                report.append(entry)
+
+        report.sort(key=lambda item: item['file'].lower())
+        return report
+
+    @classmethod
+    def _analyze_file(cls, file_name: str, file_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        ext = Path(file_name).suffix.lower()
+        language_label, handler_key = cls.LANGUAGE_RULES.get(ext, (None, None))
+        text_content = cls._extract_text_content(file_data)
+
+        entry: Dict[str, Any] = {
+            'file': file_name,
+            'language': language_label or cls._guess_language_label(ext, file_data.get('type')),
+            'status': 'skipped',
+            'message': '尚未支援此檔案格式的語法檢查'
+        }
+
+        if text_content is None:
+            entry.update({
+                'status': 'skipped',
+                'message': '非文本檔案，略過語法檢查'
+            })
+            return entry
+
+        if not text_content.strip():
+            entry.update({
+                'status': 'warning',
+                'message': '檔案內容為空或僅包含空白'
+            })
+            return entry
+
+        if len(text_content) > cls.MAX_TEXT_LENGTH:
+            entry.update({
+                'status': 'warning',
+                'message': f'內容超過 {cls.MAX_TEXT_LENGTH} 字元，請手動檢查'
+            })
+            return entry
+
+        if not handler_key:
+            return entry
+
+        checker = getattr(cls, f'_check_{handler_key}', None)
+        if not checker:
+            return entry
+
+        status, message, details = checker(text_content, file_name)
+        entry.update({
+            'status': status,
+            'message': message
+        })
+        if details:
+            entry['details'] = details
+        return entry
+
+    @staticmethod
+    def _extract_text_content(file_data: Dict[str, Any]) -> Optional[str]:
+        content = file_data.get('content')
+        if not isinstance(content, str):
+            return None
+
+        if content.startswith('data:'):
+            if ';base64,' in content:
+                header, base64_data = content.split(';base64,', 1)
+                mime_type = header.split(':', 1)[1]
+                if not mime_type.startswith('text/'):
+                    return None
+                try:
+                    decoded = base64.b64decode(base64_data)
+                    return decoded.decode('utf-8', errors='replace')
+                except Exception:
+                    return None
+            elif ',' in content:
+                return content.split(',', 1)[1]
+            else:
+                return None
+
+        return content
+
+    @staticmethod
+    def _guess_language_label(ext: str, mime_type: Optional[str]) -> str:
+        if ext:
+            return ext.lstrip('.').upper()
+        if mime_type:
+            return mime_type.split('/')[-1].upper()
+        return '未知'
+
+    @staticmethod
+    def _check_python(text: str, _: str) -> Tuple[str, str, Optional[str]]:
+        try:
+            ast.parse(text)
+            return 'passed', '語法檢查通過', None
+        except SyntaxError as error:
+            location = f"第 {error.lineno} 行第 {error.offset} 列" if error.lineno else '未知位置'
+            details = error.text.strip() if error.text else ''
+            return 'failed', f'偵測到語法問題（{location}）: {error.msg}', details
+
+    @staticmethod
+    def _check_javascript(text: str, file_name: str) -> Tuple[str, str, Optional[str]]:
+        node_path = shutil.which('node')
+        if not node_path:
+            return 'warning', '未安裝 Node.js，無法檢查 JavaScript 語法', None
+
+        suffix = '.mjs' if file_name.endswith('.mjs') else '.js'
+        with tempfile.NamedTemporaryFile('w', delete=False, suffix=suffix, encoding='utf-8') as tmp:
+            tmp.write(text)
+            tmp_path = tmp.name
+
+        try:
+            result = subprocess.run(
+                [node_path, '--check', tmp_path],
+                capture_output=True,
+                text=True,
+                timeout=15
+            )
+            if result.returncode == 0:
+                return 'passed', '語法檢查通過', None
+
+            stderr = result.stderr.strip() or result.stdout.strip()
+            return 'failed', '偵測到語法問題', stderr
+        except Exception as exc:
+            return 'warning', '執行語法檢查時發生錯誤', str(exc)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _check_typescript(text: str, _: str) -> Tuple[str, str, Optional[str]]:
+        tsc_path = shutil.which('tsc')
+        if not tsc_path:
+            return 'warning', '未安裝 TypeScript 編譯器 (tsc)，無法檢查語法', None
+
+        with tempfile.NamedTemporaryFile('w', delete=False, suffix='.ts', encoding='utf-8') as tmp:
+            tmp.write(text)
+            tmp_path = tmp.name
+
+        try:
+            result = subprocess.run(
+                [tsc_path, '--noEmit', '--pretty', 'false', tmp_path],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode == 0:
+                return 'passed', '語法檢查通過', None
+
+            stderr = result.stderr.strip() or result.stdout.strip()
+            return 'failed', '偵測到語法問題', stderr
+        except Exception as exc:
+            return 'warning', '執行語法檢查時發生錯誤', str(exc)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _check_json(text: str, _: str) -> Tuple[str, str, Optional[str]]:
+        try:
+            json.loads(text)
+            return 'passed', '語法檢查通過', None
+        except json.JSONDecodeError as error:
+            details = f"第 {error.lineno} 行第 {error.colno} 列：{error.msg}"
+            return 'failed', '偵測到語法問題', details
+
+    @staticmethod
+    def _check_yaml(text: str, _: str) -> Tuple[str, str, Optional[str]]:
+        try:
+            import yaml  # type: ignore
+        except ImportError:
+            return 'warning', '未安裝 PyYAML，無法檢查 YAML 語法', None
+
+        try:
+            yaml.safe_load(text)
+            return 'passed', '語法檢查通過', None
+        except yaml.YAMLError as error:  # type: ignore
+            return 'failed', '偵測到語法問題', str(error)
+
+    @staticmethod
+    def _check_toml(text: str, _: str) -> Tuple[str, str, Optional[str]]:
+        try:
+            import tomllib  # Python 3.11+
+        except ImportError:
+            try:
+                import tomli as tomllib  # type: ignore
+            except ImportError:
+                return 'warning', '未安裝 tomllib/tomli，無法檢查 TOML 語法', None
+
+        try:
+            tomllib.loads(text)  # type: ignore
+            return 'passed', '語法檢查通過', None
+        except Exception as error:  # noqa: B902
+            return 'failed', '偵測到語法問題', str(error)
+
+    @staticmethod
+    def _check_xml(text: str, _: str) -> Tuple[str, str, Optional[str]]:
+        try:
+            ET.fromstring(text)
+            return 'passed', '語法檢查通過', None
+        except ET.ParseError as error:
+            return 'failed', '偵測到語法問題', str(error)
+
+    @classmethod
+    def _check_html(cls, text: str, _: str) -> Tuple[str, str, Optional[str]]:
+        tag_pattern = re.compile(r'<\s*(/)?\s*([a-zA-Z0-9:-]+)([^>]*)>')
+        stack: List[Tuple[str, int]] = []
+
+        for match in tag_pattern.finditer(text):
+            closing, tag_name, attrs = match.groups()
+            tag_lower = tag_name.lower()
+
+            if attrs.strip().endswith('/') or tag_lower in cls.HTML_VOID_TAGS:
+                continue
+
+            if closing:
+                if stack and stack[-1][0] == tag_lower:
+                    stack.pop()
+                else:
+                    position = match.start()
+                    return 'failed', f'標籤 <{tag_lower}> 配對異常', f'靠近字元索引 {position}'
+            else:
+                stack.append((tag_lower, match.start()))
+
+        if stack:
+            unclosed = ', '.join(tag for tag, _ in stack[-5:])
+            return 'warning', '可能存在未關閉的標籤', f'未關閉的標籤：{unclosed}'
+
+        return 'passed', '基本標籤結構正常', None
+
+    @staticmethod
+    def _check_css(text: str, _: str) -> Tuple[str, str, Optional[str]]:
+        pairs = {'{': '}', '(': ')', '[': ']'}
+        stack: List[Tuple[str, int]] = []
+
+        for index, char in enumerate(text):
+            if char in pairs:
+                stack.append((char, index))
+            elif char in pairs.values():
+                if not stack:
+                    return 'failed', '括號配對錯誤', f'在索引 {index} 發現 {char}'
+                open_char, pos = stack.pop()
+                if pairs[open_char] != char:
+                    return 'failed', '括號配對錯誤', f'在索引 {index} 發現 {char}，但應為 {pairs[open_char]}'
+
+        if stack:
+            open_char, pos = stack[-1]
+            return 'warning', '括號可能未正確關閉', f'在索引 {pos} 附近的 {open_char} 未找到對應結束符號'
+
+        return 'passed', '括號結構正常', None
 
 # ============================================
 # 主要處理流程 - 修復版
@@ -1677,6 +1988,7 @@ class ProcessManager:
         is_iteration: bool = False,
         attach_screenshot: bool = False,
         attach_terminal: bool = False,
+        attach_syntax_report: bool = False,
         user_visible_prompt: Optional[str] = None,
         memory_context: Optional[str] = None
     ) -> ProcessResult:
@@ -1696,16 +2008,53 @@ class ProcessManager:
 
                 files.extend(project_files)
                 logger.info(f"已附加 {len(project_files)} 個專案檔案")
-            
+
+            syntax_report: List[Dict[str, Any]] = []
+            syntax_report_text: Optional[str] = None
+            if attach_syntax_report:
+                syntax_report = SyntaxChecker.generate_report(files)
+                if syntax_report:
+                    icon_map = {
+                        'passed': '✅',
+                        'failed': '❌',
+                        'warning': '⚠️',
+                        'skipped': 'ℹ️'
+                    }
+                    summary_lines: List[str] = []
+                    for entry in syntax_report:
+                        status = entry.get('status') or 'skipped'
+                        icon = icon_map.get(status, '•')
+                        language_label = entry.get('language') or '未知'
+                        message = entry.get('message') or ''
+                        detail = entry.get('details')
+                        line = f"{icon} {entry.get('file', '未命名檔案')} ({language_label}) - {message}"
+                        if detail:
+                            trimmed_detail = detail.strip().splitlines()[0]
+                            if len(trimmed_detail) > 160:
+                                trimmed_detail = trimmed_detail[:157] + '…'
+                            line = f"{line}｜{trimmed_detail}"
+                        summary_lines.append(line)
+
+                    if summary_lines:
+                        syntax_report_text = "【語法偵錯報告】\n" + "\n".join(summary_lines)
+
+            result.syntax_report = syntax_report
+
             terminal_output = None
             if attach_terminal:
                 terminal_output = ProgramManager.get_all_terminal_output()
                 if terminal_output:
                     logger.info("已附加Terminal輸出到AI請求")
                     result.terminal_output = terminal_output
-            
+
             # ⭐ 修復:在正確的時機保存用戶消息
             display_prompt = user_visible_prompt or prompt
+
+            user_metadata = {}
+            if memory_context:
+                user_metadata['memory_context'] = memory_context
+            if result.syntax_report:
+                user_metadata['syntax_report'] = result.syntax_report
 
             ConversationManager.add_message(
                 folder_path,
@@ -1713,7 +2062,7 @@ class ProcessManager:
                 display_prompt,
                 files=[{'name': f.get('name'), 'type': f.get('type')} for f in user_files_snapshot],
                 terminal_output=terminal_output,
-                metadata={'memory_context': memory_context} if memory_context else None
+                metadata=user_metadata or None
             )
             
             if is_iteration and attach_screenshot:
@@ -1783,7 +2132,7 @@ class ProcessManager:
                 logger.info("包含 Terminal 輸出")
             
             ai_response, json_data, usage_metadata = GeminiAI.generate_content(
-                prompt, config, files, terminal_output
+                prompt, config, files, terminal_output, syntax_report_text
             )
             result.ai_response = ai_response
             result.usage_metadata = usage_metadata
@@ -2352,6 +2701,7 @@ def run_process():
         is_iteration = data.get('is_iteration', False)
         attach_screenshot = data.get('attach_screenshot', False)
         attach_terminal = data.get('attach_terminal', False)
+        attach_syntax_report = data.get('attach_syntax_report', False)
         
         if not all([folder_path, prompt]):
             return jsonify({
@@ -2370,6 +2720,7 @@ def run_process():
             is_iteration,
             attach_screenshot,
             attach_terminal,
+            attach_syntax_report,
             user_visible_prompt=display_prompt,
             memory_context=memory_context
         )
@@ -2388,7 +2739,8 @@ def run_process():
             'usage_metadata': result.usage_metadata,
             'terminal_output': result.terminal_output,
             'memory_snapshot': result.memory_snapshot,
-            'evaluation_snapshot': result.evaluation_snapshot
+            'evaluation_snapshot': result.evaluation_snapshot,
+            'syntax_report': result.syntax_report
         }
         
         if result.project_data:
