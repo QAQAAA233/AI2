@@ -69,12 +69,15 @@ SCREENSHOT_DIR = CONFIG_DIR / 'screenshots'
 LOG_DIR = CONFIG_DIR / 'logs'
 PROJECTS_DIR = CONFIG_DIR / 'projects'
 CONVERSATIONS_DIR = CONFIG_DIR / 'conversations'
+MEMORY_DIR = CONFIG_DIR / 'memory'
 PROJECT_LIST_FILE = CONFIG_DIR / 'project_list.json'
+
+DEFAULT_MEMORY_TOKEN_THRESHOLD = 6000
 
 # 確保所有目錄都存在，並處理錯誤
 def ensure_directories():
     """確保所有必要的目錄都存在"""
-    directories = [CONFIG_DIR, SCREENSHOT_DIR, LOG_DIR, PROJECTS_DIR, CONVERSATIONS_DIR]
+    directories = [CONFIG_DIR, SCREENSHOT_DIR, LOG_DIR, PROJECTS_DIR, CONVERSATIONS_DIR, MEMORY_DIR]
     
     for directory in directories:
         try:
@@ -211,6 +214,61 @@ class ProcessResult:
     is_iteration: bool = False
     usage_metadata: Optional[Dict] = None
     terminal_output: str = ""
+    memory_snapshot: Optional[Dict] = None
+    token_threshold_reached: bool = False
+
+
+@dataclass
+class MemoryWindow:
+    """短期記憶窗口"""
+    id: str
+    created_at: str
+    updated_at: str
+    summary: str = ""
+    message_count: int = 0
+    token_usage: Dict[str, int] = field(default_factory=lambda: {
+        'prompt': 0,
+        'completion': 0,
+        'thought': 0,
+        'total': 0
+    })
+    notes: List[str] = field(default_factory=list)
+
+
+@dataclass
+class LongTermMemoryItem:
+    """長期記憶項目"""
+    memory_id: str
+    title: str
+    summary: str
+    detail: str
+    created_at: str
+    updated_at: str
+    tags: List[str] = field(default_factory=list)
+    references: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ProjectMemory:
+    """專案記憶資料結構"""
+    project_dir: str
+    project_name: str
+    created_at: str
+    updated_at: str
+    token_threshold: int = DEFAULT_MEMORY_TOKEN_THRESHOLD
+    windows: List[MemoryWindow] = field(default_factory=list)
+    long_term_memory: List[LongTermMemoryItem] = field(default_factory=list)
+    core_summary: Dict[str, Any] = field(default_factory=lambda: {
+        'latest': '',
+        'updated_at': ''
+    })
+    stats: Dict[str, Any] = field(default_factory=lambda: {
+        'total_messages': 0,
+        'total_tokens': 0,
+        'total_prompt_tokens': 0,
+        'total_completion_tokens': 0,
+        'total_thought_tokens': 0
+    })
 
 # ============================================
 # JSON Schema 定義 - 繁體中文化
@@ -548,6 +606,230 @@ class ConversationManager:
         except Exception as e:
             logger.error(f"刪除對話檔案失敗: {e}")
             return False
+
+
+class MemoryManager:
+    """長短期記憶管理器"""
+
+    @staticmethod
+    def get_memory_file(project_dir: str) -> Path:
+        import hashlib
+        project_hash = hashlib.md5(project_dir.encode()).hexdigest()
+        return MEMORY_DIR / f"memory_{project_hash}.json"
+
+    @staticmethod
+    def _dict_to_memory(data: Dict[str, Any]) -> ProjectMemory:
+        windows = []
+        for window_data in data.get('windows', []):
+            token_usage = window_data.get('token_usage') or {}
+            normalized_usage = {
+                'prompt': int(token_usage.get('prompt', 0)),
+                'completion': int(token_usage.get('completion', 0)),
+                'thought': int(token_usage.get('thought', 0)),
+                'total': int(token_usage.get('total', 0))
+            }
+            windows.append(MemoryWindow(
+                id=window_data.get('id', f"win-{int(time.time()*1000)}"),
+                created_at=window_data.get('created_at', datetime.now().isoformat()),
+                updated_at=window_data.get('updated_at', datetime.now().isoformat()),
+                summary=window_data.get('summary', ''),
+                message_count=int(window_data.get('message_count', 0)),
+                token_usage=normalized_usage,
+                notes=window_data.get('notes', [])
+            ))
+
+        ltms = []
+        for item in data.get('long_term_memory', []):
+            ltms.append(LongTermMemoryItem(
+                memory_id=item.get('memory_id', f"ltm-{int(time.time()*1000)}"),
+                title=item.get('title', '未命名記憶'),
+                summary=item.get('summary', ''),
+                detail=item.get('detail', ''),
+                created_at=item.get('created_at', datetime.now().isoformat()),
+                updated_at=item.get('updated_at', datetime.now().isoformat()),
+                tags=item.get('tags', []),
+                references=item.get('references', [])
+            ))
+
+        core_summary = data.get('core_summary') or {'latest': '', 'updated_at': ''}
+        stats = data.get('stats') or {
+            'total_messages': 0,
+            'total_tokens': 0,
+            'total_prompt_tokens': 0,
+            'total_completion_tokens': 0,
+            'total_thought_tokens': 0
+        }
+
+        return ProjectMemory(
+            project_dir=data.get('project_dir', ''),
+            project_name=data.get('project_name', ''),
+            created_at=data.get('created_at', datetime.now().isoformat()),
+            updated_at=data.get('updated_at', datetime.now().isoformat()),
+            token_threshold=int(data.get('token_threshold', DEFAULT_MEMORY_TOKEN_THRESHOLD)),
+            windows=windows,
+            long_term_memory=ltms,
+            core_summary=core_summary,
+            stats=stats
+        )
+
+    @staticmethod
+    def load_memory(project_dir: str, project_name: Optional[str] = None) -> ProjectMemory:
+        memory_file = MemoryManager.get_memory_file(project_dir)
+        if memory_file.exists():
+            try:
+                with open(memory_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    memory = MemoryManager._dict_to_memory(data)
+                    if not memory.project_name and project_name:
+                        memory.project_name = project_name
+                    return memory
+            except Exception as e:
+                logger.error(f"讀取記憶檔案失敗: {e}")
+
+        now = datetime.now().isoformat()
+        memory = ProjectMemory(
+            project_dir=project_dir,
+            project_name=project_name or Path(project_dir).name,
+            created_at=now,
+            updated_at=now
+        )
+        MemoryManager.ensure_window(memory)
+        MemoryManager.save_memory(memory)
+        return memory
+
+    @staticmethod
+    def save_memory(memory: ProjectMemory) -> None:
+        try:
+            MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+            memory.updated_at = datetime.now().isoformat()
+            with open(MemoryManager.get_memory_file(memory.project_dir), 'w', encoding='utf-8') as f:
+                json.dump(asdict(memory), f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"儲存記憶資料失敗: {e}")
+
+    @staticmethod
+    def ensure_window(memory: ProjectMemory) -> MemoryWindow:
+        if not memory.windows:
+            now = datetime.now().isoformat()
+            memory.windows.append(MemoryWindow(
+                id=f"win-{int(time.time()*1000)}",
+                created_at=now,
+                updated_at=now
+            ))
+        return memory.windows[-1]
+
+    @staticmethod
+    def generate_summary(messages: List[ConversationMessage], max_messages: int = 6, max_chars: int = 600) -> str:
+        if not messages:
+            return ''
+
+        selected_messages = messages[-max_messages:]
+        summary_lines = []
+        for msg in selected_messages:
+            role_label = '使用者' if msg.role == 'user' else '助手'
+            content = msg.content.strip().replace('\r', '')
+            if len(content) > 200:
+                content = content[:197] + '...'
+            summary_lines.append(f"{role_label}: {content}")
+
+        summary_text = '\n'.join(summary_lines)
+        if len(summary_text) > max_chars:
+            summary_text = summary_text[: max_chars - 3] + '...'
+        return summary_text
+
+    @staticmethod
+    def promote_to_long_term(memory: ProjectMemory, summary_text: str, notes: Optional[List[str]] = None) -> None:
+        if not summary_text:
+            return
+
+        now = datetime.now().isoformat()
+        title = summary_text.split('\n')[0][:60] if summary_text else '摘要'
+        memory.long_term_memory.append(LongTermMemoryItem(
+            memory_id=f"ltm-{int(time.time()*1000)}",
+            title=title,
+            summary=summary_text,
+            detail='\n'.join(notes or []),
+            created_at=now,
+            updated_at=now,
+            tags=['自動摘要'],
+            references=[]
+        ))
+
+    @staticmethod
+    def build_snapshot(memory: ProjectMemory) -> Dict[str, Any]:
+        current_window = MemoryManager.ensure_window(memory)
+        return {
+            'project_dir': memory.project_dir,
+            'project_name': memory.project_name,
+            'core_summary': memory.core_summary,
+            'current_window': asdict(current_window),
+            'long_term_memory': [asdict(item) for item in memory.long_term_memory],
+            'stats': memory.stats,
+            'token_threshold': memory.token_threshold,
+            'windows_count': len(memory.windows)
+        }
+
+    @staticmethod
+    def start_new_window(memory: ProjectMemory) -> MemoryWindow:
+        now = datetime.now().isoformat()
+        new_window = MemoryWindow(
+            id=f"win-{int(time.time()*1000)}",
+            created_at=now,
+            updated_at=now
+        )
+        memory.windows.append(new_window)
+        return new_window
+
+    @staticmethod
+    def update_after_interaction(
+        project_dir: str,
+        project_name: str,
+        usage_metadata: Optional[Dict[str, Any]],
+        conversation: ProjectConversation
+    ) -> Dict[str, Any]:
+        memory = MemoryManager.load_memory(project_dir, project_name)
+        window = MemoryManager.ensure_window(memory)
+
+        prompt_tokens = int((usage_metadata or {}).get('prompt_token_count', 0))
+        completion_tokens = int((usage_metadata or {}).get('candidates_token_count', 0))
+        thought_tokens = int((usage_metadata or {}).get('thoughts_token_count', 0))
+        total_tokens = int((usage_metadata or {}).get('total_token_count', prompt_tokens + completion_tokens + thought_tokens))
+
+        window.token_usage['prompt'] += prompt_tokens
+        window.token_usage['completion'] += completion_tokens
+        window.token_usage['thought'] += thought_tokens
+        window.token_usage['total'] += total_tokens
+
+        memory.stats['total_tokens'] += total_tokens
+        memory.stats['total_prompt_tokens'] += prompt_tokens
+        memory.stats['total_completion_tokens'] += completion_tokens
+        memory.stats['total_thought_tokens'] += thought_tokens
+        memory.stats['total_messages'] = len(conversation.messages)
+
+        summary_text = MemoryManager.generate_summary(conversation.messages)
+        if summary_text:
+            window.summary = summary_text
+            window.updated_at = datetime.now().isoformat()
+            memory.core_summary['latest'] = summary_text
+            memory.core_summary['updated_at'] = datetime.now().isoformat()
+
+        window.message_count = len(conversation.messages)
+
+        threshold_reached = window.token_usage['total'] >= memory.token_threshold or window.message_count >= 20
+
+        if threshold_reached:
+            MemoryManager.promote_to_long_term(memory, summary_text)
+            window.updated_at = datetime.now().isoformat()
+            MemoryManager.start_new_window(memory)
+
+        MemoryManager.save_memory(memory)
+
+        snapshot = MemoryManager.build_snapshot(memory)
+
+        return {
+            'snapshot': snapshot,
+            'threshold_reached': threshold_reached
+        }
 
 # ============================================
 # 專案管理模塊
@@ -2060,7 +2342,22 @@ class ProcessManager:
                 terminal_output=result.terminal_output,
                 usage_metadata=usage_metadata  # ⭐ 直接傳遞 usage_metadata
             )
-            
+
+            try:
+                memory_update = MemoryManager.update_after_interaction(
+                    final_project_dir,
+                    project.project_name,
+                    usage_metadata,
+                    ConversationManager.load_conversation(final_project_dir)
+                )
+                result.memory_snapshot = memory_update.get('snapshot')
+                result.token_threshold_reached = memory_update.get('threshold_reached', False)
+
+                if result.token_threshold_reached:
+                    logger.info("記憶窗口達到閾值，已建立新的短期記憶視窗")
+            except Exception as memory_error:
+                logger.error(f"更新記憶模塊失敗: {memory_error}")
+
         except Exception as e:
             result.error = str(e)
             logger.error(f"處理流程失敗: {e}")
@@ -2165,7 +2462,10 @@ def load_project():
         project_files = ProjectManager.load_project_files(project_dir)
         project_structure = ProjectManager.get_project_structure(project_dir)
         conversation = ConversationManager.load_conversation(project_dir)
-        
+        memory_snapshot = MemoryManager.build_snapshot(
+            MemoryManager.load_memory(project_dir, project_info.get('project_name'))
+        )
+
         # ⭐ 修復:正確序列化對話消息,保留 usage_metadata
         messages_data = []
         for msg in conversation.messages:
@@ -2190,7 +2490,8 @@ def load_project():
                 'messages': messages_data,
                 'created_at': conversation.created_at,
                 'updated_at': conversation.updated_at
-            }
+            },
+            'memory_snapshot': memory_snapshot
         })
         
     except Exception as e:
@@ -2238,6 +2539,20 @@ def get_conversation(project_dir):
             'success': False,
             'error': str(e)
         }), 500
+
+
+@app.route('/api/memory/<path:project_dir>', methods=['GET'])
+def get_memory_snapshot(project_dir):
+    """獲取專案記憶快照"""
+    try:
+        conversation = ConversationManager.load_conversation(project_dir)
+        project_name = conversation.project_name or Path(project_dir).name
+        memory = MemoryManager.load_memory(project_dir, project_name)
+        snapshot = MemoryManager.build_snapshot(memory)
+        return jsonify({'success': True, 'memory': snapshot})
+    except Exception as e:
+        logger.error(f"載入記憶資料失敗: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/projects', methods=['GET'])
 def get_projects():
@@ -2324,7 +2639,9 @@ def run_process():
             'screenshots': result.screenshots,
             'is_iteration': result.is_iteration,
             'usage_metadata': result.usage_metadata,
-            'terminal_output': result.terminal_output
+            'terminal_output': result.terminal_output,
+            'memory_snapshot': result.memory_snapshot,
+            'token_threshold_reached': result.token_threshold_reached
         }
         
         if result.project_data:

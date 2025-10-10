@@ -179,6 +179,48 @@
                 </div>
             </div>
 
+            <div class="memory-dashboard" id="memoryDashboard" style="display: none;">
+                <div class="memory-header">
+                    <div>
+                        <div class="memory-title">核心記憶總結</div>
+                        <div class="memory-window-info" id="memoryWindowInfo"></div>
+                    </div>
+                    <div class="memory-header-actions">
+                        <span class="memory-threshold" id="memoryThresholdBadge">Token 閾值 6000</span>
+                        <button class="memory-refresh-btn" onclick="refreshMemorySnapshot()">刷新</button>
+                    </div>
+                </div>
+                <div class="memory-summary-text" id="memorySummaryText">尚無摘要</div>
+                <div class="memory-stats-grid">
+                    <div class="memory-stat">
+                        <span class="memory-stat-label">當前 Token</span>
+                        <span class="memory-stat-value" id="memoryCurrentTokens">0</span>
+                    </div>
+                    <div class="memory-stat">
+                        <span class="memory-stat-label">提示 Token</span>
+                        <span class="memory-stat-value" id="memoryPromptTokens">0</span>
+                    </div>
+                    <div class="memory-stat">
+                        <span class="memory-stat-label">回應 Token</span>
+                        <span class="memory-stat-value" id="memoryCompletionTokens">0</span>
+                    </div>
+                    <div class="memory-stat">
+                        <span class="memory-stat-label">累計 Token</span>
+                        <span class="memory-stat-value" id="memoryTotalTokens">0</span>
+                    </div>
+                    <div class="memory-stat">
+                        <span class="memory-stat-label">累計訊息</span>
+                        <span class="memory-stat-value" id="memoryTotalMessages">0</span>
+                    </div>
+                </div>
+                <div class="memory-long-term-section">
+                    <div class="memory-long-term-header">
+                        <span>長期記憶</span>
+                    </div>
+                    <div class="memory-long-term-list" id="memoryLongTermList"></div>
+                </div>
+            </div>
+
             <div class="results-container" id="resultsContainer" style="display: none;"></div>
         </div>
 
