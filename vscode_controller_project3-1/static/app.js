@@ -13,6 +13,10 @@ let allProjects = [];
 let modelConfig = null;
 let sidebarCollapsed = false;
 let MODEL_LIMITS = {};
+let projectMemories = {};
+let latestProjectMemory = null;
+let memoryPanelCollapsed = true;
+let previewMemoryPath = null;
 
 // ============================================
 // Loading Overlay 控制 - 修復版
@@ -167,7 +171,7 @@ function updateAttachedFilesDisplay() {
     const section = document.getElementById('attachedFilesSection');
     const countBadge = document.getElementById('attachedFilesCount');
     const filesList = document.getElementById('attachedFilesList');
-    
+
     if (!section || !countBadge || !filesList) return;
     
     if (uploadedFiles.length === 0) {
@@ -191,6 +195,422 @@ function updateAttachedFilesDisplay() {
     });
     
     updateProjectPanelVisibility();
+}
+
+// ============================================
+// 對話與記憶面板控制
+// ============================================
+function showConversationArea() {
+    const area = document.getElementById('conversationArea');
+    const results = document.getElementById('resultsContainer');
+    if (area) area.style.display = 'flex';
+    if (results) results.style.display = 'block';
+}
+
+function hideConversationArea(clear = false) {
+    const area = document.getElementById('conversationArea');
+    const results = document.getElementById('resultsContainer');
+    if (results) {
+        results.style.display = 'none';
+        if (clear) {
+            results.innerHTML = '';
+        }
+    }
+    if (area) {
+        area.style.display = 'none';
+    }
+}
+
+function storeProjectMemory(projectPath, evaluation) {
+    if (!projectPath || !evaluation) return;
+
+    projectMemories[projectPath] = evaluation;
+
+    if (projectPath === currentProjectDir) {
+        latestProjectMemory = evaluation;
+    }
+
+    if (!previewMemoryPath) {
+        previewMemoryPath = projectPath;
+    }
+
+    if (previewMemoryPath === projectPath) {
+        renderMemoryPanel(evaluation, projectPath);
+    } else {
+        renderMemoryProjects();
+    }
+}
+
+function applyStoredMemory(projectPath) {
+    if (!projectPath) return;
+
+    const memory = projectMemories[projectPath] || null;
+    if (projectPath === currentProjectDir) {
+        latestProjectMemory = memory;
+    }
+
+    if (!previewMemoryPath) {
+        previewMemoryPath = projectPath;
+    }
+
+    if (previewMemoryPath === projectPath) {
+        renderMemoryPanel(memory, projectPath);
+    } else {
+        renderMemoryProjects();
+    }
+}
+
+function resolveMemoryField(source, keys) {
+    if (!source) return null;
+    for (const key of keys) {
+        if (Object.prototype.hasOwnProperty.call(source, key) && source[key]) {
+            return source[key];
+        }
+    }
+    return null;
+}
+
+function normalizeGoalFlag(value) {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value !== 0;
+    if (typeof value === 'string') {
+        return ['true', '1', 'yes', 'y', '是', '當前', '目前'].includes(value.trim().toLowerCase());
+    }
+    return false;
+}
+
+function renderMemoryPanel(memory, sourcePath = null) {
+    const panel = document.getElementById('memoryPanel');
+    const scoreEl = document.getElementById('memoryScore');
+    const feedbackEl = document.getElementById('memoryFeedback');
+    const deductionEl = document.getElementById('memoryDeduction');
+    const adviceEl = document.getElementById('memoryAdvice');
+    const summaryEl = document.getElementById('memorySummary');
+    const stmEl = document.getElementById('memorySTM');
+    const ltmEl = document.getElementById('memoryLTM');
+    const goalsContainer = document.getElementById('memoryGoals');
+    const emptyState = document.getElementById('memoryEmpty');
+    const evaluationSection = document.getElementById('memoryEvaluationSection');
+    const coreSection = document.getElementById('memoryCoreSection');
+    const projectLabel = document.getElementById('memoryPanelProject');
+
+    if (!panel || !scoreEl || !feedbackEl || !deductionEl || !adviceEl || !summaryEl || !stmEl || !ltmEl || !goalsContainer || !emptyState || !evaluationSection || !coreSection || !projectLabel) {
+        return;
+    }
+
+    if (sourcePath) {
+        previewMemoryPath = sourcePath;
+    } else if (!previewMemoryPath && currentProjectDir) {
+        previewMemoryPath = currentProjectDir;
+    }
+
+    const activePath = previewMemoryPath;
+    let activeMemory = memory;
+
+    if ((!activeMemory || Object.keys(activeMemory || {}).length === 0) && activePath && projectMemories[activePath]) {
+        activeMemory = projectMemories[activePath];
+    }
+
+    if (activePath) {
+        const projectInfo = allProjects.find(project => project.path === activePath);
+        if (projectInfo && projectInfo.name) {
+            projectLabel.textContent = projectInfo.name;
+        } else {
+            const pathParts = activePath.split(/[\\/]/).filter(Boolean);
+            projectLabel.textContent = pathParts[pathParts.length - 1] || '未命名專案';
+        }
+    } else {
+        projectLabel.textContent = '尚未選擇專案';
+    }
+
+    if (activeMemory && Object.keys(activeMemory).length > 0) {
+        const scoreValue = typeof activeMemory['評分'] === 'number' ? `${activeMemory['評分']} 分` : (activeMemory['評分'] || '--');
+        scoreEl.textContent = scoreValue;
+        feedbackEl.textContent = activeMemory['內容評價'] || '尚未提供內容評價。';
+        deductionEl.textContent = `扣分原因：${activeMemory['扣分原因'] || '無'}`;
+        adviceEl.textContent = `改進建議：${activeMemory['改進建議'] || '無'}`;
+
+        const core = activeMemory['核心記憶模塊'] || {};
+        summaryEl.textContent = resolveMemoryField(core, ['專案總結']) || '尚未提供專案總結。';
+        stmEl.textContent = resolveMemoryField(core, ['短期記憶', '短期記憶 (STM)', '短期記憶( STM )', '短期記憶(STM)']) || '尚未提供短期記憶。';
+        ltmEl.textContent = resolveMemoryField(core, ['長期記憶', '長期記憶 (LTM)', '長期記憶( LTM )', '長期記憶(LTM)']) || '尚未提供長期記憶。';
+
+        goalsContainer.innerHTML = '';
+        const goals = Array.isArray(core['專案目標']) ? core['專案目標'] : [];
+        if (goals.length > 0) {
+            goals.forEach(goal => {
+                const goalItem = document.createElement('div');
+                goalItem.className = 'memory-goal-item';
+                if (normalizeGoalFlag(goal?.['是否為當前任務'])) {
+                    goalItem.classList.add('active');
+                }
+
+                const step = document.createElement('span');
+                step.className = 'memory-goal-step';
+                const stepValue = goal?.['步驟'] != null ? goal['步驟'] : '?';
+                step.textContent = `步驟 ${stepValue}`;
+
+                const task = document.createElement('div');
+                task.className = 'memory-goal-task';
+                task.textContent = goal?.['任務'] || '未設定任務內容';
+
+                const status = document.createElement('span');
+                status.className = 'memory-goal-status';
+                status.textContent = goal?.['狀態'] || '未開始';
+
+                goalItem.appendChild(step);
+                goalItem.appendChild(task);
+                goalItem.appendChild(status);
+                goalsContainer.appendChild(goalItem);
+            });
+        } else {
+            const emptyGoal = document.createElement('div');
+            emptyGoal.className = 'memory-goal-empty';
+            emptyGoal.textContent = '尚未設定專案目標。';
+            goalsContainer.appendChild(emptyGoal);
+        }
+
+        emptyState.style.display = 'none';
+        evaluationSection.style.display = 'block';
+        coreSection.style.display = 'block';
+        panel.classList.remove('memory-empty-state');
+    } else {
+        scoreEl.textContent = '--';
+        feedbackEl.textContent = '尚未產生評分資訊。';
+        deductionEl.textContent = '扣分原因：--';
+        adviceEl.textContent = '改進建議：--';
+        summaryEl.textContent = '--';
+        stmEl.textContent = '--';
+        ltmEl.textContent = '--';
+        goalsContainer.innerHTML = '<div class="memory-goal-empty">尚未設定專案目標。</div>';
+        emptyState.style.display = 'flex';
+        evaluationSection.style.display = 'none';
+        coreSection.style.display = 'none';
+        panel.classList.add('memory-empty-state');
+    }
+
+    if (memoryPanelCollapsed) {
+        panel.classList.add('collapsed');
+    } else {
+        panel.classList.remove('collapsed');
+    }
+
+    updateMemoryToggleIcon();
+    renderMemoryProjects();
+}
+
+function renderMemoryProjects() {
+    const section = document.getElementById('memoryProjectsSection');
+    const list = document.getElementById('memoryProjectList');
+    if (!section || !list) return;
+
+    const entries = Object.entries(projectMemories).filter(([, value]) => value && Object.keys(value).length > 0);
+
+    if (entries.length === 0) {
+        section.style.display = 'none';
+        list.innerHTML = '';
+        return;
+    }
+
+    section.style.display = 'flex';
+    list.innerHTML = '';
+
+    const orderedPaths = [];
+    if (Array.isArray(allProjects) && allProjects.length > 0) {
+        allProjects.forEach(project => {
+            if (projectMemories[project.path]) {
+                orderedPaths.push(project.path);
+            }
+        });
+    }
+    entries.forEach(([path]) => {
+        if (!orderedPaths.includes(path)) {
+            orderedPaths.push(path);
+        }
+    });
+
+    orderedPaths.forEach(path => {
+        const evaluation = projectMemories[path];
+        if (!evaluation) return;
+
+        const item = document.createElement('div');
+        item.className = 'memory-project-item';
+        if (path === previewMemoryPath) {
+            item.classList.add('active');
+        }
+
+        const header = document.createElement('div');
+        header.className = 'memory-project-item-header';
+
+        const info = document.createElement('div');
+        info.className = 'memory-project-info';
+
+        const title = document.createElement('div');
+        title.className = 'memory-project-item-title';
+        const projectInfo = allProjects.find(project => project.path === path);
+        const projectName = projectInfo?.name || (path ? path.split(/[\\/]/).pop() : '未命名專案');
+        title.textContent = projectName;
+
+        const desc = document.createElement('div');
+        desc.className = 'memory-project-item-desc';
+        desc.textContent = projectInfo?.description || '無描述';
+
+        info.appendChild(title);
+        info.appendChild(desc);
+
+        const score = document.createElement('div');
+        score.className = 'memory-project-item-score';
+        const rawScore = evaluation['評分'];
+        score.textContent = typeof rawScore === 'number' ? `${rawScore} 分` : (rawScore || '--');
+
+        header.appendChild(info);
+        header.appendChild(score);
+
+        const summary = document.createElement('div');
+        summary.className = 'memory-project-item-summary';
+        summary.textContent = evaluation['內容評價'] || '尚未提供內容評價。';
+
+        const actions = document.createElement('div');
+        actions.className = 'memory-project-item-actions';
+
+        const previewBtn = document.createElement('button');
+        previewBtn.className = 'memory-project-preview-btn';
+        previewBtn.textContent = '檢視記憶';
+        previewBtn.onclick = (event) => {
+            event.stopPropagation();
+            previewMemoryForProject(path);
+        };
+
+        actions.appendChild(previewBtn);
+
+        if (path === currentProjectDir) {
+            const badge = document.createElement('span');
+            badge.className = 'memory-project-current';
+            badge.textContent = '目前專案';
+            actions.appendChild(badge);
+        } else {
+            const switchBtn = document.createElement('button');
+            switchBtn.className = 'memory-project-switch-btn';
+            switchBtn.textContent = '切換專案';
+            switchBtn.onclick = (event) => {
+                event.stopPropagation();
+                const projectObj = allProjects.find(project => project.path === path);
+                if (projectObj) {
+                    selectProject(projectObj);
+                } else {
+                    showNotification('專案列表中找不到此專案', 'warning');
+                }
+            };
+            actions.appendChild(switchBtn);
+        }
+
+        item.appendChild(header);
+        item.appendChild(summary);
+        item.appendChild(actions);
+
+        item.onclick = () => previewMemoryForProject(path);
+
+        list.appendChild(item);
+    });
+}
+
+function previewMemoryForProject(path) {
+    if (!path) return;
+    const memory = projectMemories[path];
+    if (!memory) {
+        showNotification('此專案尚未生成記憶資料', 'info');
+        return;
+    }
+
+    renderMemoryPanel(memory, path);
+}
+
+function toggleMemoryPanel() {
+    const panel = document.getElementById('memoryPanel');
+    if (!panel) return;
+    memoryPanelCollapsed = !memoryPanelCollapsed;
+    if (memoryPanelCollapsed) {
+        panel.classList.add('collapsed');
+    } else {
+        panel.classList.remove('collapsed');
+    }
+    updateMemoryToggleIcon();
+}
+
+function updateMemoryToggleIcon() {
+    const icon = document.getElementById('memoryToggleIcon');
+    if (!icon) return;
+    icon.textContent = memoryPanelCollapsed ? '◀' : '▶';
+}
+
+function insertPreviousMemory() {
+    togglePlusMenu();
+
+    if (!currentProjectDir) {
+        showNotification('請先選擇或創建專案後再插入記憶', 'warning');
+        return;
+    }
+
+    if (!latestProjectMemory) {
+        showNotification('目前沒有上一輪的記憶資料可以插入', 'warning');
+        return;
+    }
+
+    const input = document.getElementById('mainInput');
+    if (!input) return;
+
+    const memoryText = buildMemoryInsertText(latestProjectMemory);
+    const hasContent = input.value.trim().length > 0;
+    input.value = hasContent ? `${input.value.trimEnd()}\n\n${memoryText}\n` : `${memoryText}\n`;
+    autoResize(input);
+    updateSubmitButton();
+    showNotification('已插入上一輪記憶與建議', 'success');
+}
+
+function buildMemoryInsertText(memory) {
+    const lines = [];
+    const scoreValue = typeof memory['評分'] === 'number' ? `${memory['評分']} 分` : (memory['評分'] || '未提供');
+    lines.push(`上一輪評分：${scoreValue}`);
+    lines.push(`扣分原因：${memory['扣分原因'] || '無'}`);
+    lines.push(`上一輪改進建議：${memory['改進建議'] || '無'}`);
+
+    const core = memory['核心記憶模塊'] || {};
+    lines.push('【上一輪記憶摘要】');
+    lines.push(`專案總結：${resolveMemoryField(core, ['專案總結']) || '無'}`);
+    lines.push(`短期記憶：${resolveMemoryField(core, ['短期記憶', '短期記憶 (STM)', '短期記憶( STM )', '短期記憶(STM)']) || '無'}`);
+    lines.push(`長期記憶：${resolveMemoryField(core, ['長期記憶', '長期記憶 (LTM)', '長期記憶( LTM )', '長期記憶(LTM)']) || '無'}`);
+
+    lines.push('【專案目標】');
+    const goals = Array.isArray(core['專案目標']) ? core['專案目標'] : [];
+    if (goals.length > 0) {
+        goals.forEach(goal => {
+            const step = goal && goal['步驟'] != null ? goal['步驟'] : '?';
+            const task = goal && goal['任務'] ? goal['任務'] : '未設定任務';
+            const status = goal && goal['狀態'] ? goal['狀態'] : '未開始';
+            const focus = normalizeGoalFlag(goal?.['是否為當前任務']) ? '（當前重點）' : '';
+            lines.push(`步驟 ${step}: ${task} - 狀態：${status}${focus}`);
+        });
+    } else {
+        lines.push('尚未設定專案目標。');
+    }
+
+    return lines.join('\n');
+}
+
+function getFileIcon(filename = '') {
+    const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
+    const imageExt = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'bmp', 'webp'];
+    if (ext === 'py') return '🐍';
+    if (['js', 'jsx', 'ts', 'tsx'].includes(ext)) return '🟨';
+    if (['html', 'htm'].includes(ext)) return '🌐';
+    if (ext === 'css') return '🎨';
+    if (ext === 'json') return '🗂️';
+    if (['md', 'txt', 'rtf'].includes(ext)) return '📝';
+    if (['yml', 'yaml'].includes(ext)) return '📘';
+    if (['pdf'].includes(ext)) return '📕';
+    if (['zip', 'rar', '7z'].includes(ext)) return '🗜️';
+    if (imageExt.includes(ext)) return '🖼️';
+    return '📎';
 }
 
 // ============================================
@@ -325,9 +745,14 @@ async function handleSubmit() {
     }
 
     document.getElementById('emptyState').style.display = 'none';
-    document.getElementById('resultsContainer').style.display = 'block';
+    showConversationArea();
 
-    addMessage('user', prompt);
+    const messageFiles = uploadedFiles.map(file => ({
+        name: file.name,
+        type: file.type || 'text/plain'
+    }));
+
+    const userMessageElement = addMessage('user', prompt, null, null, messageFiles);
 
     input.value = '';
     updateSubmitButton();
@@ -355,8 +780,9 @@ async function handleSubmit() {
         const result = await response.json();
 
         if (result.success) {
-            addMessage('assistant', result.output, result.usage_metadata, result.terminal_output);
-            
+            if (userMessageElement && result.user_terminal_output) {
+                appendTerminalOutputToMessage(userMessageElement, result.user_terminal_output, 'user');
+            }
             if (result.project) {
                 currentProject = result.project;
                 if (result.ai_response_json) {
@@ -369,18 +795,23 @@ async function handleSubmit() {
                 if (!isIterationMode) {
                     const newProjectDir = currentProjectDir + '/' + currentProject.name;
                     currentProjectDir = newProjectDir;
-                    
+
                     isIterationMode = true;
                     const badge = document.getElementById('projectModeBadge');
                     if (badge) {
                         badge.textContent = '延續';
                         badge.style.background = '#0ea5e9';
                     }
+                    previewMemoryPath = currentProjectDir;
+                    renderMemoryPanel(projectMemories[currentProjectDir] || null, currentProjectDir);
+                    renderMemoryProjects();
                 }
             }
 
+            addMessage('assistant', result.output, result.usage_metadata, result.terminal_output, null, result.evaluation);
+
             showNotification(result.is_iteration ? '專案迭代成功!' : '專案創建成功!', 'success');
-            
+
             loadProjectsList();
             uploadedFiles = [];
             updateFilesPreview();
@@ -397,10 +828,10 @@ async function handleSubmit() {
     }
 }
 
-function addMessage(role, content, usageMetadata = null, terminalOutput = null) {
+function addMessage(role, content, usageMetadata = null, terminalOutput = null, files = null, evaluation = null) {
     const container = document.getElementById('resultsContainer');
-    if (!container) return;
-    
+    if (!container) return null;
+
     const message = document.createElement('div');
     message.className = `result-message ${role} selectable`;
 
@@ -424,21 +855,47 @@ function addMessage(role, content, usageMetadata = null, terminalOutput = null) 
 
     message.appendChild(header);
     message.appendChild(messageContent);
-    
-    // ✅ Terminal輸出只顯示在用戶消息中
-    if (role === 'user' && terminalOutput && terminalOutput.trim()) {
-        const terminalSection = document.createElement('div');
-        terminalSection.className = 'terminal-output-section';
-        terminalSection.innerHTML = `
-            <div class="terminal-header">
-                <span class="terminal-title">Terminal 輸出</span>
-            </div>
-            <div class="terminal-body selectable">${terminalOutput}</div>
-        `;
-        message.appendChild(terminalSection);
+
+    if (Array.isArray(files) && files.length > 0) {
+        const attachmentsSection = document.createElement('div');
+        attachmentsSection.className = 'attachments-section';
+
+        const title = document.createElement('div');
+        title.className = 'attachments-title';
+        title.textContent = '附加檔案';
+        attachmentsSection.appendChild(title);
+
+        const list = document.createElement('div');
+        list.className = 'attachments-list';
+
+        files.forEach(file => {
+            if (!file) return;
+            const chip = document.createElement('div');
+            chip.className = 'attachment-chip';
+
+            const icon = document.createElement('span');
+            icon.className = 'attachment-icon';
+            const fileName = file.name || file.filename || '未命名檔案';
+            const fileType = file.type || file.filetype || '';
+            icon.textContent = getFileIcon(fileName);
+
+            const name = document.createElement('span');
+            name.className = 'attachment-name';
+            name.textContent = fileName;
+
+            chip.title = fileType ? `${fileName} (${fileType})` : fileName;
+
+            chip.appendChild(icon);
+            chip.appendChild(name);
+            list.appendChild(chip);
+        });
+
+        attachmentsSection.appendChild(list);
+        message.appendChild(attachmentsSection);
     }
-    
-    // Token使用統計只顯示在AI回應中
+
+    appendTerminalOutputToMessage(message, terminalOutput, role);
+
     if (role === 'assistant' && usageMetadata && typeof usageMetadata === 'object') {
         const tokenUsage = document.createElement('div');
         tokenUsage.className = 'token-usage';
@@ -462,9 +919,74 @@ function addMessage(role, content, usageMetadata = null, terminalOutput = null) 
         `;
         message.appendChild(tokenUsage);
     }
-    
+
+    if (role === 'assistant' && evaluation) {
+        const evaluationPreview = document.createElement('div');
+        evaluationPreview.className = 'evaluation-preview';
+
+        const scoreValue = typeof evaluation['評分'] === 'number'
+            ? `${evaluation['評分']} 分`
+            : (evaluation['評分'] || '--');
+
+        const score = document.createElement('div');
+        score.className = 'evaluation-score';
+        score.textContent = scoreValue;
+
+        const summary = document.createElement('div');
+        summary.className = 'evaluation-summary';
+        summary.textContent = evaluation['內容評價'] || '尚無評語';
+
+        evaluationPreview.appendChild(score);
+        evaluationPreview.appendChild(summary);
+        message.appendChild(evaluationPreview);
+    }
+
     container.appendChild(message);
     message.scrollIntoView({ behavior: 'smooth' });
+
+    if (role === 'assistant' && evaluation && currentProjectDir) {
+        storeProjectMemory(currentProjectDir, evaluation);
+    }
+
+    return message;
+}
+
+function appendTerminalOutputToMessage(messageElement, terminalOutput, role = 'assistant') {
+    if (!messageElement || !terminalOutput || !terminalOutput.trim()) {
+        return;
+    }
+
+    let section = messageElement.querySelector('.terminal-output-section');
+    const titleText = role === 'user' ? 'Terminal 輸出 (已附加)' : 'Terminal 輸出';
+
+    if (!section) {
+        section = document.createElement('div');
+        section.className = 'terminal-output-section';
+
+        const header = document.createElement('div');
+        header.className = 'terminal-header';
+
+        const title = document.createElement('span');
+        title.className = 'terminal-title';
+        header.appendChild(title);
+
+        const body = document.createElement('div');
+        body.className = 'terminal-body selectable';
+
+        section.appendChild(header);
+        section.appendChild(body);
+        messageElement.appendChild(section);
+    }
+
+    const titleElement = section.querySelector('.terminal-title');
+    if (titleElement) {
+        titleElement.textContent = titleText;
+    }
+
+    const bodyElement = section.querySelector('.terminal-body');
+    if (bodyElement) {
+        bodyElement.textContent = terminalOutput;
+    }
 }
 
 function useSuggestion(text) {
@@ -508,12 +1030,17 @@ async function createNewProject() {
             uploadedFiles = [];
             updateFilesPreview();
             updateAttachedFilesDisplay();
-            
+
             document.getElementById('projectStructureSection').style.display = 'none';
             document.getElementById('emptyState').style.display = 'none';
-            document.getElementById('resultsContainer').style.display = 'block';
+            showConversationArea();
             document.getElementById('resultsContainer').innerHTML = '';
-            
+            latestProjectMemory = null;
+            memoryPanelCollapsed = true;
+            previewMemoryPath = currentProjectDir;
+            renderMemoryPanel(null, currentProjectDir);
+            renderMemoryProjects();
+
             showNotification('已選擇專案資料夾', 'success');
             document.getElementById('mainInput')?.focus();
         } else {
@@ -550,16 +1077,18 @@ async function selectExistingFolder() {
                     badge.textContent = '延續';
                     badge.style.background = '#0ea5e9';
                 }
-                
+
                 document.getElementById('homeBtn').style.display = 'flex';
-                
+
                 document.querySelectorAll('.project-item').forEach(item => {
                     item.classList.remove('active');
                 });
-                
+
                 document.getElementById('emptyState').style.display = 'none';
                 document.getElementById('resultsContainer').style.display = 'block';
-                
+                previewMemoryPath = currentProjectDir;
+                applyStoredMemory(currentProjectDir);
+
                 showNotification(`已載入專案: ${currentProject.name}`, 'success');
             } else {
                 showNotification('此資料夾不是有效的專案，將作為新專案', 'warning');
@@ -594,7 +1123,19 @@ async function loadProjectsList() {
         
         if (result.success) {
             allProjects = result.projects;
+            result.projects.forEach(project => {
+                if (project.latest_evaluation) {
+                    projectMemories[project.path] = project.latest_evaluation;
+                }
+            });
             displayProjectsList(allProjects);
+            renderMemoryProjects();
+
+            if (previewMemoryPath && projectMemories[previewMemoryPath]) {
+                renderMemoryPanel(projectMemories[previewMemoryPath], previewMemoryPath);
+            } else if (currentProjectDir && projectMemories[currentProjectDir]) {
+                renderMemoryPanel(projectMemories[currentProjectDir], currentProjectDir);
+            }
         }
     } catch (error) {
         console.error('載入專案列表失敗:', error);
@@ -615,11 +1156,12 @@ function displayProjectsList(projects) {
     projects.forEach(project => {
         const item = document.createElement('div');
         item.className = 'project-item';
-        
+        item.dataset.path = project.path;
+
         if (currentProjectDir === project.path) {
             item.classList.add('active');
         }
-        
+
         const timeAgo = getTimeAgo(project.last_accessed);
         
         item.innerHTML = `
@@ -631,7 +1173,7 @@ function displayProjectsList(projects) {
             <div class="project-item-time">${timeAgo}</div>
         `;
         
-        item.onclick = () => selectProject(project);
+        item.onclick = () => selectProject(project, item);
         container.appendChild(item);
     });
 }
@@ -651,10 +1193,10 @@ function getTimeAgo(dateString) {
     return date.toLocaleDateString('zh-TW');
 }
 
-async function selectProject(project) {
+async function selectProject(project, sourceElement = null) {
     currentProjectDir = project.path;
     isIterationMode = true;
-    
+
     document.getElementById('currentProjectDisplay').style.display = 'block';
     document.getElementById('currentProjectName').textContent = project.name;
     const badge = document.getElementById('projectModeBadge');
@@ -665,19 +1207,28 @@ async function selectProject(project) {
     
     document.getElementById('homeBtn').style.display = 'flex';
     
-    document.querySelectorAll('.project-item').forEach(item => {
+    const projectItems = document.querySelectorAll('.project-item');
+    let matchedElement = sourceElement;
+    projectItems.forEach(item => {
         item.classList.remove('active');
+        if (!matchedElement && item.dataset && item.dataset.path === project.path) {
+            matchedElement = item;
+        }
     });
-    event.target.closest('.project-item')?.classList.add('active');
-    
+    if (matchedElement) {
+        matchedElement.classList.add('active');
+    }
+
     document.getElementById('emptyState').style.display = 'none';
-    document.getElementById('resultsContainer').style.display = 'block';
+    showConversationArea();
     document.getElementById('resultsContainer').innerHTML = '';
-    
+    previewMemoryPath = project.path;
+    applyStoredMemory(project.path);
+
     uploadedFiles = [];
     updateFilesPreview();
     updateAttachedFilesDisplay();
-    
+
     await loadExistingProject(project.path);
     
     showNotification(`已切換到專案: ${project.name}`, 'success');
@@ -707,21 +1258,35 @@ async function loadExistingProject(projectDir) {
                     main_file: result.project_info.main_file
                 }
             };
-            
+
             document.getElementById('currentProjectName').textContent = currentProject.name;
             displayProjectStructure(result.project_info.files);
-            
+            showConversationArea();
+
             if (result.conversation && result.conversation.messages) {
                 const container = document.getElementById('resultsContainer');
                 if (container) {
                     container.innerHTML = '';
-                    
+
+                    let evaluationFound = false;
                     for (const msg of result.conversation.messages) {
-                        addMessage(msg.role, msg.content, msg.usage_metadata, msg.terminal_output);
+                        const evaluation = msg.metadata && msg.metadata.evaluation ? msg.metadata.evaluation : null;
+                        if (evaluation) {
+                            evaluationFound = true;
+                        }
+                        addMessage(msg.role, msg.content, msg.usage_metadata, msg.terminal_output, msg.files, evaluation);
+                    }
+
+                    if (result.latest_evaluation && !evaluationFound) {
+                        storeProjectMemory(projectDir, result.latest_evaluation);
+                    } else if (!evaluationFound) {
+                        applyStoredMemory(projectDir);
                     }
                 }
+            } else if (result.latest_evaluation) {
+                storeProjectMemory(projectDir, result.latest_evaluation);
             }
-            
+
             return true;
         } else {
             return false;
@@ -801,7 +1366,17 @@ async function deleteProject(projectPath) {
             showNotification('專案已從列表移除', 'success');
             allProjects = allProjects.filter(p => p.path !== projectPath);
             displayProjectsList(allProjects);
-            
+            delete projectMemories[projectPath];
+            if (previewMemoryPath === projectPath) {
+                previewMemoryPath = currentProjectDir || null;
+            }
+            if (previewMemoryPath && projectMemories[previewMemoryPath]) {
+                renderMemoryPanel(projectMemories[previewMemoryPath], previewMemoryPath);
+            } else {
+                renderMemoryPanel(currentProjectDir ? projectMemories[currentProjectDir] || null : null, currentProjectDir || null);
+            }
+            renderMemoryProjects();
+
             if (currentProjectDir === projectPath) {
                 resetToHome();
             }
@@ -819,19 +1394,23 @@ function resetToHome() {
     if (!confirm('確定要回到初始介面嗎？當前專案選擇將被清除。')) {
         return;
     }
-    
+
     currentProjectDir = null;
     currentProject = null;
     isIterationMode = false;
     uploadedFiles = [];
-    
+    latestProjectMemory = null;
+    memoryPanelCollapsed = true;
+    previewMemoryPath = null;
+
     document.getElementById('currentProjectDisplay').style.display = 'none';
     document.getElementById('emptyState').style.display = 'flex';
-    document.getElementById('resultsContainer').style.display = 'none';
-    document.getElementById('resultsContainer').innerHTML = '';
+    hideConversationArea(true);
+    renderMemoryPanel(null, null);
+    renderMemoryProjects();
     document.getElementById('projectStructureSection').style.display = 'none';
     document.getElementById('homeBtn').style.display = 'none';
-    
+
     document.querySelectorAll('.project-item').forEach(item => {
         item.classList.remove('active');
     });
