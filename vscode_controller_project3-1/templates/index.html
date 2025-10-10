@@ -179,7 +179,75 @@
                 </div>
             </div>
 
-            <div class="results-container" id="resultsContainer" style="display: none;"></div>
+            <div class="workspace-area" id="workspaceArea">
+                <div class="results-container" id="resultsContainer" style="display: none;"></div>
+                <div class="memory-panel" id="memoryPanel">
+                    <button class="memory-panel-toggle" id="memoryPanelToggle" onclick="toggleMemoryPanel()" title="收合記憶面板">
+                        <span id="memoryPanelToggleIcon">⮜</span>
+                    </button>
+                    <div class="memory-panel-content" id="memoryPanelContent">
+                        <div class="memory-panel-header">
+                            <div class="memory-panel-title-group">
+                                <h3>專案記憶總覽</h3>
+                                <p>長短期記憶與評分改進自指系統</p>
+                            </div>
+                            <div class="memory-panel-hint" id="memoryBundleStatus">自動附帶上一輪記憶：開啟</div>
+                        </div>
+                        <div class="memory-panel-body">
+                            <div class="memory-projects-column">
+                                <div class="memory-projects-header">專案列表</div>
+                                <div class="memory-projects-list" id="memoryProjectsList">
+                                    <div class="memory-empty-text">尚未載入任何專案記憶</div>
+                                </div>
+                            </div>
+                            <div class="memory-detail-column">
+                                <div class="memory-detail-header">
+                                    <div class="memory-score-badge">
+                                        <span class="memory-score-value" id="memoryDetailScore">--</span>
+                                        <span class="memory-score-label">評分</span>
+                                    </div>
+                                    <div class="memory-detail-meta">
+                                        <div class="memory-detail-name" id="memoryDetailProjectName">未選擇專案</div>
+                                        <div class="memory-updated" id="memoryDetailUpdated">尚未更新</div>
+                                    </div>
+                                </div>
+                                <div class="memory-section">
+                                    <div class="memory-subtitle">內容評價</div>
+                                    <div class="memory-text" id="memoryDetailEvaluation">尚未產生評估資料</div>
+                                </div>
+                                <div class="memory-section">
+                                    <div class="memory-subtitle">扣分原因</div>
+                                    <div class="memory-text" id="memoryDetailDeduction">無</div>
+                                </div>
+                                <div class="memory-section">
+                                    <div class="memory-subtitle">改進建議</div>
+                                    <div class="memory-text" id="memoryDetailImprovement">尚未提供改進建議</div>
+                                </div>
+                                <div class="memory-divider"></div>
+                                <div class="memory-section">
+                                    <div class="memory-subtitle">專案總結</div>
+                                    <div class="memory-text" id="memoryDetailSummary">尚未建立專案摘要</div>
+                                </div>
+                                <div class="memory-section">
+                                    <div class="memory-subtitle">短期記憶</div>
+                                    <div class="memory-text" id="memoryDetailSTM">尚無短期記憶</div>
+                                </div>
+                                <div class="memory-section">
+                                    <div class="memory-subtitle">長期記憶</div>
+                                    <div class="memory-text" id="memoryDetailLTM">尚無長期記憶</div>
+                                </div>
+                                <div class="memory-divider"></div>
+                                <div class="memory-section">
+                                    <div class="memory-subtitle">專案目標</div>
+                                    <div class="memory-goals" id="memoryDetailGoals">
+                                        <div class="memory-empty-text">尚未建立專案目標</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <div class="input-area">
@@ -216,6 +284,14 @@
                                     <line x1="12" y1="19" x2="20" y2="19"/>
                                 </svg>
                                 <span>附加 Terminal 輸出</span>
+                            </div>
+                            <div class="menu-item" id="memoryMenuItem" onclick="toggleAttachMemoryBundle()">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polygon points="12 3 4 8 12 13 20 8 12 3"/>
+                                    <polyline points="4 13 12 18 20 13"/>
+                                    <polyline points="4 18 12 23 20 18"/>
+                                </svg>
+                                <span>附帶長短期記憶與改進建議</span>
                             </div>
                             <div class="menu-divider"></div>
                             <div class="menu-item" onclick="showAdvancedSettings()">

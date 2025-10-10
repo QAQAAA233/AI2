@@ -69,12 +69,20 @@ SCREENSHOT_DIR = CONFIG_DIR / 'screenshots'
 LOG_DIR = CONFIG_DIR / 'logs'
 PROJECTS_DIR = CONFIG_DIR / 'projects'
 CONVERSATIONS_DIR = CONFIG_DIR / 'conversations'
+MEMORY_DIR = CONFIG_DIR / 'memory'
 PROJECT_LIST_FILE = CONFIG_DIR / 'project_list.json'
 
 # 確保所有目錄都存在，並處理錯誤
 def ensure_directories():
     """確保所有必要的目錄都存在"""
-    directories = [CONFIG_DIR, SCREENSHOT_DIR, LOG_DIR, PROJECTS_DIR, CONVERSATIONS_DIR]
+    directories = [
+        CONFIG_DIR,
+        SCREENSHOT_DIR,
+        LOG_DIR,
+        PROJECTS_DIR,
+        CONVERSATIONS_DIR,
+        MEMORY_DIR
+    ]
     
     for directory in directories:
         try:
@@ -211,6 +219,64 @@ class ProcessResult:
     is_iteration: bool = False
     usage_metadata: Optional[Dict] = None
     terminal_output: str = ""
+    memory_state: Optional[Dict[str, Any]] = None
+    request_terminal_context: Optional[str] = None
+    generated_attachments: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class MemoryState:
+    """長短期記憶與評分資料"""
+    project_dir: str
+    project_name: str
+    score: Optional[int] = None
+    evaluation: str = ""
+    deduction_reason: str = ""
+    improvement: str = ""
+    thinking_module: Dict[str, Any] = field(default_factory=dict)
+    updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+
+    def to_payload(self) -> Dict[str, Any]:
+        normalized_thinking = self.thinking_module or {}
+        if normalized_thinking:
+            goals = normalized_thinking.get('專案目標')
+            if isinstance(goals, list):
+                normalized_goals = []
+                for goal in goals:
+                    if not isinstance(goal, dict):
+                        continue
+                    step_value = goal.get('步驟') or goal.get('step')
+                    try:
+                        step_value = int(step_value)
+                    except (TypeError, ValueError):
+                        step_value = goal.get('步驟', goal.get('step'))
+                    status_value = goal.get('狀態') or goal.get('status') or "未開始"
+                    current_flag = goal.get('是否為當前任務')
+                    if isinstance(current_flag, str):
+                        current_flag = current_flag.strip().lower() in {"true", "1", "yes", "y"}
+                    normalized_goals.append({
+                        '步驟': step_value,
+                        '任務': goal.get('任務') or goal.get('task') or "",
+                        '狀態': status_value,
+                        '是否為當前任務': bool(current_flag)
+                    })
+                normalized_thinking['專案目標'] = normalized_goals
+
+        return {
+            'project_dir': self.project_dir,
+            'project_name': self.project_name,
+            'updated_at': self.updated_at,
+            'score': self.score,
+            '評分': self.score,
+            'evaluation': self.evaluation,
+            '內容評價': self.evaluation,
+            'deduction_reason': self.deduction_reason or "無",
+            '扣分原因': self.deduction_reason or "無",
+            'improvement': self.improvement,
+            '改進建議': self.improvement,
+            'thinking_module': normalized_thinking,
+            '核心記憶模塊': normalized_thinking
+        }
 
 # ============================================
 # JSON Schema 定義 - 繁體中文化
@@ -226,6 +292,37 @@ def get_json_schema():
             "main_file": {"type": "string", "description": "主要執行檔案"},
             "setup_instructions": {"type": "array", "items": {"type": "string"}, "description": "設置指令"},
             "run_instructions": {"type": "array", "items": {"type": "string"}, "description": "執行指令"},
+            "評分": {
+                "type": ["integer", "string"],
+                "description": "0-100 的整數評分,可為數值或數字字串"
+            },
+            "內容評價": {"type": "string", "description": "針對本次輸出的精簡評價"},
+            "扣分原因": {"type": "string", "description": "若有扣分需說明,否則填寫 無"},
+            "改進建議": {"type": "string", "description": "下一輪可依循的具體改進方向"},
+            "核心記憶模塊": {
+                "type": "object",
+                "description": "長短期記憶與專案目標資料",
+                "properties": {
+                    "專案總結": {"type": "string", "description": "最近對話的整體摘要"},
+                    "短期記憶": {"type": "string", "description": "近期決策與關鍵資訊"},
+                    "長期記憶": {"type": "string", "description": "專案長期目標、背景或持續性資訊"},
+                    "專案目標": {
+                        "type": "array",
+                        "description": "以步驟描述的專案任務清單",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "步驟": {"type": ["integer", "string"], "description": "目標步驟編號"},
+                                "任務": {"type": "string", "description": "此步驟的具體任務"},
+                                "狀態": {"type": "string", "description": "任務狀態,例如 已完成/進行中/未開始"},
+                                "是否為當前任務": {"type": "boolean", "description": "是否為本輪優先處理的任務"}
+                            },
+                            "required": ["步驟", "任務", "狀態", "是否為當前任務"]
+                        }
+                    }
+                },
+                "required": ["專案總結", "短期記憶", "長期記憶", "專案目標"]
+            },
             "files": {
                 "type": "array",
                 "items": {
@@ -253,109 +350,70 @@ def get_json_schema():
                 }
             }
         },
-        "required": ["project_name", "description", "files"]
+        "required": ["project_name", "description", "files", "評分", "內容評價", "扣分原因", "改進建議", "核心記憶模塊"]
     }
 
 def get_json_system_instruction():
-    """獲取 JSON 模式的系統指令 - 繁體中文版 + Flask修復"""
-    return """你是一位專業的程式碼助手,能夠生成完整、可運行的專案程式碼。
+    """獲取 JSON 模式的系統指令 - 長短期記憶增強版"""
+    return """你是一位專精於完整專案交付的繁體中文程式開發助手。請嚴格輸出**單一 JSON 物件**並遵循下列結構,不得額外輸出文字、陣列或程式碼區塊:
 
-回應時,你必須輸出一個符合以下結構的有效 JSON 物件:
 {
-    "project_name": "描述性的專案名稱",
-    "description": "專案功能的簡要描述",
-    "main_file": "main.py",
-    "setup_instructions": ["pip install package1", "pip install package2"],
-    "run_instructions": ["python main.py", "開啟瀏覽器前往 http://localhost:5000"],
+    "project_name": "專案名稱(需具體)",
+    "description": "專案目的與功能說明",
+    "main_file": "主要啟動檔案名稱",
+    "setup_instructions": ["pip install fastapi", "pip install uvicorn"],
+    "run_instructions": ["python main.py"],
+    "評分": 95,
+    "內容評價": "200 字內說明本次回應的品質、規則遵守狀況與亮點。",
+    "扣分原因": "若無扣分請填寫 無,若有請具體描述。",
+    "改進建議": "針對不足提出下一輪可執行的改善方向。",
+    "核心記憶模塊": {
+        "專案總結": "濃縮描述目前專案成果與進展。",
+        "短期記憶": "列出最近數輪對話中影響當前決策的重點,可使用 1-3 句完成。",
+        "長期記憶": "保存跨輪次仍須遵循的背景、願景、限制或踩坑經驗。",
+        "專案目標": [
+            {"步驟": 1, "任務": "已完成任務", "狀態": "已完成", "是否為當前任務": false},
+            {"步驟": 2, "任務": "當前優先任務", "狀態": "進行中", "是否為當前任務": true},
+            {"步驟": 3, "任務": "下一個待辦項目", "狀態": "未開始", "是否為當前任務": false},
+            {"步驟": 4, "任務": "預先規劃的後續工作", "狀態": "未開始", "是否為當前任務": false}
+        ]
+    },
     "files": [
         {
             "filename": "main.py",
             "filetype": "python",
-            "code": "import flask\\n\\napp = flask.Flask(__name__)\\n\\n@app.route('/')\\ndef home():\\n    return 'Hello World'\\n\\nif __name__ == '__main__':\\n    app.run(host='0.0.0.0', port=5000)",
+            "code": "# 需提供可直接執行的完整程式碼\nprint('Hello')",
             "opens_window": false,
             "window_title": null,
-            "install_requirements": ["pip install flask"],
-            "dependencies": ["flask"],
-            "description": "主應用程式檔案",
+            "install_requirements": ["pip install fastapi"],
+            "dependencies": ["fastapi"],
+            "description": "檔案用途與模組說明",
             "run_command": "python main.py",
             "is_web_app": true,
             "can_open_standalone": false,
-            "server_address": "http://localhost:5000",
-            "web_title": "我的網頁應用"
+            "server_address": "http://localhost:8000",
+            "web_title": "專案頁面標題"
         }
     ]
 }
 
-重要格式要則:
-1. "code" 欄位必須包含正確格式化的程式碼,使用真實的換行符號和縮排
-2. 在 code 字串中使用實際的換行字元 (\\n) 和 Tab 字元 (\\t),不是文字上的 \\n 字串
-3. 程式碼必須是有效的 JSON 字串 - 正確跳脫引號
-4. 確保程式碼中的縮排正確保留
-5. 程式碼的每一行應該在 JSON 字串中獨立成行
+規則與評分指標:
+1. 所有文字、描述、註解、變數命名一律使用繁體中文。
+2. `評分` 必須是 0-100 的整數; 若無扣分請在 `扣分原因` 輸出「無」。
+3. `內容評價` 最長 200 字,需同時涵蓋規則遵守與內容品質。
+4. `核心記憶模塊` 為長短期記憶與自指系統,四個欄位皆必填,`專案目標` 至少 4 筆並標記 `是否為當前任務`。
+5. `改進建議` 需具體、可執行,避免空泛陳述,若本輪滿分仍需指出可精進之處。
+6. `files` 內的 `code` 必須是可直接複製執行的完整程式碼,嚴禁使用省略號或偽代碼。
 
-**CRITICAL Flask/Web Server 要則:**
-1. **絕對禁止使用 debug=True** - 這會導致在 subprocess 中運行時崩潰
-2. Flask 應用必須使用:`app.run(host='0.0.0.0', port=5000)` (不帶 debug 參數)
-3. Node.js/Express 應用也不要使用開發模式的熱重載
-4. 如果需要開發便利性,可以在代碼註釋中說明手動運行時可加 debug=True
+程式碼產出注意事項:
+- 嚴禁在任何伺服器程式碼中啟用 debug=True。
+- Flask 伺服器必須使用 `app.run(host='0.0.0.0', port=5000)`。
+- 若生成網頁或 API,需附上必要的 CORS/靜態檔案設定與啟動指令。
+- GUI 或網頁若會開啟視窗,需提供 `window_title` 或 `web_title`。
+- 每個檔案皆須提供用途描述、安裝需求與執行命令,並確保引用關係正確。
 
-網頁應用要則:
-1. 對於 HTML 檔案或伺服器應用程式(Flask、Node.js 等),設定 "is_web_app": true
-2. 只有在你的程式碼包含自動開啟瀏覽器功能時,才設定 "can_open_standalone": true:
-   - Python: 使用 webbrowser.open() 或 Flask 加上 app.run(port=5000) + webbrowser
-   - Node.js: 使用 'open' 套件或類似工具
-   - HTML: 如果是可以直接開啟的獨立 HTML
-3. 如果 "can_open_standalone" 為 false 但 "is_web_app" 為 true,請提供:
-   - "server_address": 應用程式將運行的 URL(例如:"http://localhost:5000")
-   - "web_title": 網頁的標題
-4. 對於獨立的 HTML 檔案,將 opens_window 和 is_web_app 都設為 true
-5. 對於伺服器應用程式,控制器將處理開啟獨立瀏覽器視窗
+最終回應只能有上述 JSON 物件,不可加入 Markdown、解釋文字或多餘標點。"""
 
-重要要則:
-1. 始終生成完整、可運行的程式碼 - 不要使用佔位符或省略號
-2. 對於 GUI 應用程式(pygame/tkinter),設定視窗標題以匹配專案名稱
-3. 對於網頁應用,確保 HTML 有適當的 <title> 標籤
-4. 包含所有必要的匯入和錯誤處理
-5. 正確指定檔案類型(python、javascript、html 等)
-6. 對於 GUI 應用程式或獨立 HTML 檔案,將 opens_window 設為 true
-7. 在 install_requirements 中列出所有套件安裝命令
-8. 為每個檔案提供清晰的描述
-9. 對於多檔案專案,確保檔案正確連結
-
-支持的檔案類型:
-python, javascript, html, css, typescript, java, cpp, c, go, rust, ruby, php, swift, kotlin, sql, shell, yaml, json, xml, markdown, text
-
-記住:
-- 只輸出有效的 JSON,不要有額外的文字或 markdown 格式
-- 確保程式碼正確格式化,縮排正確
-- 在程式碼字串中使用真實的換行符號,而不是 \\n 文字
-- 對於網頁應用,仔細考慮獨立瀏覽器視窗的能力
-- **Flask/Web 伺服器絕對不要使用 debug=True**
-
-對於 HTML + 後端專案的特別注意事項:
-1. 確保後端伺服器(Flask/Node.js)正確配置 CORS 和靜態檔案服務
-2. HTML 檔案應該正確引用後端 API 端點
-3. 提供完整的前後端連接測試程式碼
-4. 在 run_instructions 中明確說明:
-   - 先啟動後端伺服器
-   - 後端服務地址
-   - 前端如何訪問
-5. 對於需要同時運行前後端的專案:
-   - 後端檔案設定 is_web_app: true, can_open_standalone: false
-   - 提供準確的 server_address 和 web_title
-   - 確保後端程式碼包含適當的路由和 CORS 設定
-   - **後端絕對不要使用 debug=True**
-6. 測試程式碼應該驗證:
-   - 後端伺服器啟動成功
-   - API 端點可訪問
-   - 前後端數據交互正常
-
-Terminal 輸出和除錯資訊:
-1. 所有重要的執行步驟都應該有 print() 或 console.log() 輸出
-2. 包含適當的錯誤處理和錯誤訊息輸出
-3. 啟動時輸出服務地址和狀態資訊
-4. 對於網頁應用,輸出 "伺服器運行於: http://localhost:PORT"
-"""
 
 # ============================================
 # 配置管理模塊
@@ -549,6 +607,199 @@ class ConversationManager:
             logger.error(f"刪除對話檔案失敗: {e}")
             return False
 
+
+class MemoryManager:
+    """專案長短期記憶與評分管理器"""
+
+    @staticmethod
+    def get_memory_file(project_dir: str) -> Path:
+        import hashlib
+        project_hash = hashlib.md5(project_dir.encode()).hexdigest()
+        return MEMORY_DIR / f"memory_{project_hash}.json"
+
+    @staticmethod
+    def load_state(project_dir: str) -> Optional[Dict[str, Any]]:
+        memory_file = MemoryManager.get_memory_file(project_dir)
+        if not memory_file.exists():
+            return None
+
+        try:
+            with open(memory_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"載入記憶資料失敗: {e}")
+            return None
+
+    @staticmethod
+    def save_state(memory_state: MemoryState) -> bool:
+        memory_file = MemoryManager.get_memory_file(memory_state.project_dir)
+        try:
+            with open(memory_file, 'w', encoding='utf-8') as f:
+                json.dump(memory_state.to_payload(), f, ensure_ascii=False, indent=2)
+            logger.info(f"記憶資料已更新: {memory_state.project_dir}")
+            return True
+        except Exception as e:
+            logger.error(f"儲存記憶資料失敗: {e}")
+            return False
+
+    @staticmethod
+    def delete_state(project_dir: str) -> bool:
+        memory_file = MemoryManager.get_memory_file(project_dir)
+        if memory_file.exists():
+            try:
+                memory_file.unlink()
+                logger.info(f"已刪除記憶資料: {memory_file}")
+                return True
+            except Exception as e:
+                logger.error(f"刪除記憶資料失敗: {e}")
+        return False
+
+    @staticmethod
+    def migrate_state(old_dir: str, new_dir: str, project_name: str):
+        if old_dir == new_dir:
+            return
+        payload = MemoryManager.load_state(old_dir)
+        if not payload:
+            return
+
+        raw_score = payload.get('score') if payload.get('score') not in ('', None) else payload.get('評分')
+        try:
+            score_value = int(raw_score) if raw_score not in (None, '') else None
+        except (ValueError, TypeError):
+            score_value = None
+
+        state = MemoryState(
+            project_dir=new_dir,
+            project_name=project_name,
+            score=score_value,
+            evaluation=payload.get('evaluation') or payload.get('內容評價', ''),
+            deduction_reason=payload.get('deduction_reason') or payload.get('扣分原因', ''),
+            improvement=payload.get('improvement') or payload.get('改進建議', ''),
+            thinking_module=payload.get('thinking_module') or payload.get('核心記憶模塊') or {}
+        )
+
+        if MemoryManager.save_state(state):
+            MemoryManager.delete_state(old_dir)
+
+    @staticmethod
+    def parse_from_json(project_dir: str, project_name: str, json_data: Dict[str, Any]) -> Optional[MemoryState]:
+        if not json_data:
+            return None
+
+        score_value = json_data.get('評分')
+        if isinstance(score_value, str):
+            try:
+                score_value = int(score_value.strip())
+            except ValueError:
+                score_value = None
+        if isinstance(score_value, (int, float)):
+            try:
+                score_value = int(score_value)
+                score_value = max(0, min(100, score_value))
+            except (TypeError, ValueError):
+                score_value = None
+
+        evaluation = json_data.get('內容評價', '')
+        deduction = json_data.get('扣分原因', '')
+        improvement = json_data.get('改進建議', '')
+        thinking_module = json_data.get('核心記憶模塊', {}) or {}
+
+        if isinstance(thinking_module, dict):
+            goals = thinking_module.get('專案目標')
+            if isinstance(goals, list):
+                normalized_goals = []
+                for goal in goals:
+                    if not isinstance(goal, dict):
+                        continue
+                    goal_step = goal.get('步驟') or goal.get('step')
+                    try:
+                        goal_step = int(goal_step)
+                    except (TypeError, ValueError):
+                        goal_step = goal.get('步驟', goal.get('step'))
+                    goal_status = goal.get('狀態') or goal.get('status') or "未開始"
+                    current_flag = goal.get('是否為當前任務') or goal.get('current')
+                    if isinstance(current_flag, str):
+                        current_flag = current_flag.strip().lower() in {"true", "1", "yes", "y"}
+                    normalized_goals.append({
+                        '步驟': goal_step,
+                        '任務': goal.get('任務') or goal.get('task') or "",
+                        '狀態': goal_status,
+                        '是否為當前任務': bool(current_flag)
+                    })
+                thinking_module['專案目標'] = normalized_goals
+
+            for key, alias in [('短期記憶', '短期記憶 (STM)'), ('長期記憶', '長期記憶 (LTM)')]:
+                if key not in thinking_module and alias in thinking_module:
+                    thinking_module[key] = thinking_module.get(alias)
+
+        if not any([score_value is not None, evaluation, deduction, improvement, thinking_module]):
+            return None
+
+        memory_state = MemoryState(
+            project_dir=project_dir,
+            project_name=project_name,
+            score=score_value,
+            evaluation=evaluation,
+            deduction_reason=deduction or "無",
+            improvement=improvement,
+            thinking_module=thinking_module
+        )
+        return memory_state
+
+    @staticmethod
+    def build_prompt_context(memory_payload: Dict[str, Any]) -> str:
+        if not memory_payload:
+            return ""
+
+        lines = [
+            "=== 上一輪評分與記憶摘要 ==="
+        ]
+
+        score = memory_payload.get('score')
+        if score is not None:
+            lines.append(f"評分: {score}")
+
+        evaluation = memory_payload.get('evaluation') or memory_payload.get('內容評價')
+        if evaluation:
+            lines.append(f"內容評價: {evaluation}")
+
+        deduction = memory_payload.get('deduction_reason') or memory_payload.get('扣分原因')
+        if deduction and deduction != "無":
+            lines.append(f"扣分原因: {deduction}")
+
+        improvement = memory_payload.get('improvement') or memory_payload.get('改進建議')
+        if improvement:
+            lines.append(f"改進建議: {improvement}")
+
+        thinking = memory_payload.get('thinking_module') or memory_payload.get('核心記憶模塊') or {}
+        if thinking:
+            project_summary = thinking.get('專案總結')
+            if project_summary:
+                lines.append(f"專案總結: {project_summary}")
+
+            stm = thinking.get('短期記憶') or thinking.get('短期記憶 (STM)')
+            if stm:
+                lines.append(f"短期記憶: {stm}")
+
+            ltm = thinking.get('長期記憶') or thinking.get('長期記憶 (LTM)')
+            if ltm:
+                lines.append(f"長期記憶: {ltm}")
+
+            goals = thinking.get('專案目標')
+            if isinstance(goals, list) and goals:
+                lines.append("專案目標狀態:")
+                for goal in goals:
+                    step = goal.get('步驟') or goal.get('step')
+                    task = goal.get('任務') or goal.get('task')
+                    status = goal.get('狀態') or goal.get('status')
+                    is_current = goal.get('是否為當前任務') or goal.get('current')
+                    goal_line = f"- 步驟 {step}: {task} ({status})"
+                    if is_current:
+                        goal_line += " ← 當前任務"
+                    lines.append(goal_line)
+
+        lines.append("=== 記憶摘要結束 ===")
+        return "\n".join(lines)
 # ============================================
 # 專案管理模塊
 # ============================================
@@ -1660,11 +1911,13 @@ class ProcessManager:
         files: List[Dict] = None,
         is_iteration: bool = False,
         attach_screenshot: bool = False,
-        attach_terminal: bool = False
+        attach_terminal: bool = False,
+        include_memory_bundle: bool = True
     ) -> ProcessResult:
         """執行完整的自動化流程 - 修復版"""
         
         result = ProcessResult(success=False, is_iteration=is_iteration)
+        new_memory_state: Optional[MemoryState] = None
         
         try:
             if is_iteration:
@@ -1682,15 +1935,33 @@ class ProcessManager:
                 terminal_output = ProgramManager.get_all_terminal_output()
                 if terminal_output:
                     logger.info("已附加Terminal輸出到AI請求")
-                    result.terminal_output = terminal_output
-            
+                    result.request_terminal_context = terminal_output
+
+            memory_context_payload = None
+            memory_context_text = ""
+            if include_memory_bundle:
+                memory_context_payload = MemoryManager.load_state(folder_path)
+                if memory_context_payload:
+                    memory_context_text = MemoryManager.build_prompt_context(memory_context_payload)
+                    if memory_context_text:
+                        logger.info("已附加上一輪記憶摘要至提示詞")
+
+            prompt_to_send = prompt
+            if memory_context_text:
+                prompt_to_send = f"{prompt}\n\n{memory_context_text}"
+
             # ⭐ 修復:在正確的時機保存用戶消息
             ConversationManager.add_message(
                 folder_path,
                 'user',
                 prompt,
-                files=[{'name': f.get('name'), 'type': f.get('type')} for f in (files or [])],
-                terminal_output=terminal_output
+                files=[{'name': f.get('name'), 'type': f.get('type'), 'size': f.get('size')} for f in (files or [])],
+                terminal_output=terminal_output,
+                metadata={
+                    'attached_terminal': bool(terminal_output),
+                    'attached_files': len(files or []) > 0,
+                    'memory_context_included': include_memory_bundle and bool(memory_context_text)
+                }
             )
             
             if is_iteration and attach_screenshot:
@@ -1758,9 +2029,9 @@ class ProcessManager:
                 logger.info(f"包含 {len(files)} 個檔案")
             if terminal_output:
                 logger.info("包含 Terminal 輸出")
-            
+
             ai_response, json_data, usage_metadata = GeminiAI.generate_content(
-                prompt, config, files, terminal_output
+                prompt_to_send, config, files, terminal_output
             )
             result.ai_response = ai_response
             result.ai_response_json = json_data
@@ -1850,13 +2121,55 @@ class ProcessManager:
             saved_files, updated_files = CodeProcessor.save_project_files(folder_path, project, is_iteration)
             result.files_created = saved_files
             result.files_updated = updated_files
-            
+            result.generated_attachments = []
+
             # ⭐ 關鍵修復:確定最終的專案目錄
             if is_iteration:
                 final_project_dir = folder_path
             else:
                 final_project_dir = str(Path(folder_path) / project.project_name)
-            
+
+            # ⭐ 記憶檔案遷移與更新
+            if not is_iteration:
+                MemoryManager.migrate_state(folder_path, final_project_dir, project.project_name)
+
+            for file in project.files:
+                file_path = str(Path(final_project_dir) / file.filename)
+                is_updated = file_path in updated_files
+                is_created = file_path in saved_files
+                status_flag = 'updated' if is_updated else 'created' if is_created else 'unchanged'
+                try:
+                    code_size = len(file.code.encode('utf-8')) if isinstance(file.code, str) else 0
+                except Exception:
+                    code_size = 0
+                result.generated_attachments.append({
+                    'name': file.filename,
+                    'type': file.filetype,
+                    'size': code_size,
+                    'status': status_flag,
+                    'description': file.description,
+                    'run_command': file.run_command,
+                    'install_requirements': file.install_requirements
+                })
+
+            if result.ai_response_json:
+                new_memory_state = MemoryManager.parse_from_json(
+                    final_project_dir,
+                    project.project_name,
+                    result.ai_response_json
+                )
+                if new_memory_state:
+                    result.memory_state = new_memory_state.to_payload()
+                    MemoryManager.save_state(new_memory_state)
+                else:
+                    existing_memory = MemoryManager.load_state(final_project_dir)
+                    if existing_memory:
+                        result.memory_state = existing_memory
+            else:
+                existing_memory = MemoryManager.load_state(final_project_dir)
+                if existing_memory:
+                    result.memory_state = existing_memory
+
             # ⭐ 關鍵修復:處理對話遷移
             if not is_iteration and folder_path != final_project_dir:
                 logger.info("新建專案:遷移對話記錄...")
@@ -1875,6 +2188,8 @@ class ProcessManager:
                         logger.info("已清理臨時對話檔案")
                     except Exception as e:
                         logger.warning(f"清理臨時對話檔案失敗: {e}")
+
+                    MemoryManager.delete_state(folder_path)
             
             logger.info("Step 6: 啟動 VS Code...")
             
@@ -2057,6 +2372,7 @@ class ProcessManager:
                     'project_name': project.project_name,
                     'files_count': len(project.files)
                 },
+                files=result.generated_attachments,
                 terminal_output=result.terminal_output,
                 usage_metadata=usage_metadata  # ⭐ 直接傳遞 usage_metadata
             )
@@ -2165,6 +2481,7 @@ def load_project():
         project_files = ProjectManager.load_project_files(project_dir)
         project_structure = ProjectManager.get_project_structure(project_dir)
         conversation = ConversationManager.load_conversation(project_dir)
+        memory_state = MemoryManager.load_state(project_dir)
         
         # ⭐ 修復:正確序列化對話消息,保留 usage_metadata
         messages_data = []
@@ -2186,6 +2503,7 @@ def load_project():
             'project_files': project_files,
             'project_structure': project_structure,
             'files_count': len(project_files),
+            'memory_state': memory_state,
             'conversation': {
                 'messages': messages_data,
                 'created_at': conversation.created_at,
@@ -2245,6 +2563,13 @@ def get_projects():
     try:
         projects = ProjectManager.get_project_list()
         projects.sort(key=lambda x: x.get('last_accessed', ''), reverse=True)
+        for project in projects:
+            project_path = project.get('path')
+            if not project_path:
+                project['memory_state'] = None
+                continue
+            memory_payload = MemoryManager.load_state(project_path)
+            project['memory_state'] = memory_payload
         return jsonify({
             'success': True,
             'projects': projects
@@ -2292,6 +2617,7 @@ def run_process():
         is_iteration = data.get('is_iteration', False)
         attach_screenshot = data.get('attach_screenshot', False)
         attach_terminal = data.get('attach_terminal', False)
+        include_memory_bundle = data.get('include_memory_bundle', True)
         
         if not all([folder_path, prompt]):
             return jsonify({
@@ -2309,7 +2635,8 @@ def run_process():
             files,
             is_iteration,
             attach_screenshot,
-            attach_terminal
+            attach_terminal,
+            include_memory_bundle
         )
         
         response_data = {
@@ -2317,6 +2644,7 @@ def run_process():
             'output': result.output,
             'files_created': result.files_created,
             'files_updated': result.files_updated,
+            'generated_attachments': result.generated_attachments,
             'ai_response': result.ai_response or '無 AI 回應',
             'ai_response_json': result.ai_response_json,
             'installation_logs': result.installation_logs,
@@ -2324,7 +2652,9 @@ def run_process():
             'screenshots': result.screenshots,
             'is_iteration': result.is_iteration,
             'usage_metadata': result.usage_metadata,
-            'terminal_output': result.terminal_output
+            'terminal_output': result.terminal_output,
+            'memory_state': result.memory_state,
+            'request_terminal_output': result.request_terminal_context
         }
         
         if result.project_data:
