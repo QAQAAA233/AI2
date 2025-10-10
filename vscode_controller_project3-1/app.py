@@ -15,8 +15,10 @@ import time
 import re
 import json
 import platform
+import mimetypes
 import logging
 import queue
+import hashlib
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
 from pathlib import Path
@@ -172,8 +174,12 @@ class AIConfig:
                 "auto_error_fix": False,
                 "auto_optimize": False,
                 "auto_test": False,
-                "monitor_interval": 5
+                "monitor_interval": 5,
+                "token_reset_threshold": 120000
             }
+        else:
+            self.automation_settings.setdefault("token_reset_threshold", 120000)
+            self.automation_settings.setdefault("monitor_interval", 5)
 
 @dataclass
 class ConversationMessage:
@@ -194,6 +200,209 @@ class ProjectConversation:
     messages: List[ConversationMessage] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+    summary: str = ""
+    short_term_memory: List[Dict] = field(default_factory=list)
+    long_term_memory: List[Dict] = field(default_factory=list)
+    quality_score: Optional[int] = None
+    quality_notes: Optional[str] = None
+    memory_notes: Optional[str] = None
+
+
+class MemoryEngine:
+    """負責長短期記憶與摘要評分的核心模組"""
+
+    SUMMARY_MAX_LENGTH = 420
+    STM_LIMIT = 6
+    LTM_LIMIT = 10
+
+    @staticmethod
+    def _clean_text(text: str, length: int = 160) -> str:
+        cleaned = re.sub(r"\s+", " ", text or "").strip()
+        if len(cleaned) > length:
+            return cleaned[: length - 1] + "…"
+        return cleaned
+
+    @staticmethod
+    def build_summary(messages: List[ConversationMessage]) -> str:
+        if not messages:
+            return "尚未開始對話，請輸入需求以建立摘要。"
+
+        focus_segments = []
+        recent_messages = messages[-8:]
+        for msg in recent_messages:
+            prefix = "使用者" if msg.role == 'user' else '助手'
+            focus_segments.append(f"{prefix}：{MemoryEngine._clean_text(msg.content, 120)}")
+
+        summary_body = " / ".join(focus_segments)
+        summary = f"最新進展重點：{summary_body}"
+
+        if len(summary) > MemoryEngine.SUMMARY_MAX_LENGTH:
+            summary = summary[: MemoryEngine.SUMMARY_MAX_LENGTH - 1] + "…"
+
+        return summary
+
+    @staticmethod
+    def build_short_term_memory(messages: List[ConversationMessage]) -> List[Dict]:
+        stm = []
+        for msg in messages[-MemoryEngine.STM_LIMIT:]:
+            stm.append({
+                'role': msg.role,
+                'timestamp': msg.timestamp,
+                'content': MemoryEngine._clean_text(msg.content, 180)
+            })
+        return stm
+
+    @staticmethod
+    def _extract_tags(text: str) -> List[str]:
+        words = re.findall(r"[\w\u4e00-\u9fa5]{2,}", text or "")
+        unique = []
+        for word in words:
+            word = word.lower()
+            if word not in unique:
+                unique.append(word)
+            if len(unique) >= 6:
+                break
+        return unique
+
+    @staticmethod
+    def update_long_term_memory(conversation: ProjectConversation) -> List[Dict]:
+        if not conversation.long_term_memory:
+            conversation.long_term_memory = []
+
+        summary = conversation.summary or MemoryEngine.build_summary(conversation.messages)
+        memory_id_source = f"{conversation.project_dir}-{summary}".encode('utf-8', errors='ignore')
+        memory_id = hashlib.sha1(memory_id_source).hexdigest()[:12]
+        now = datetime.now().isoformat()
+        tags = MemoryEngine._extract_tags(summary)
+
+        existing = next((item for item in conversation.long_term_memory if item.get('memory_id') == memory_id), None)
+
+        if existing:
+            existing['detail'] = summary
+            existing['tags'] = tags
+            existing['last_referenced_at'] = now
+            existing['score'] = min(1.0, float(existing.get('score', 0.7)) + 0.05)
+        else:
+            conversation.long_term_memory.append({
+                'memory_id': memory_id,
+                'title': f"核心摘要 @ {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                'detail': summary,
+                'tags': tags,
+                'source_messages': list(range(max(len(conversation.messages) - 8, 0), len(conversation.messages))),
+                'score': 0.7,
+                'created_at': now,
+                'last_referenced_at': now
+            })
+
+        conversation.long_term_memory = sorted(
+            conversation.long_term_memory,
+            key=lambda item: item.get('last_referenced_at', ''),
+            reverse=True
+        )[: MemoryEngine.LTM_LIMIT]
+
+        return conversation.long_term_memory
+
+    @staticmethod
+    def evaluate_quality(messages: List[ConversationMessage]) -> Tuple[int, str]:
+        if not messages:
+            return 50, "尚未有任何對話內容，請繼續輸入需求。"
+
+        latest_assistant = next((msg for msg in reversed(messages) if msg.role == 'assistant'), None)
+        if not latest_assistant:
+            return 60, "尚未獲得 AI 回覆。"
+
+        base_score = 85
+        feedback = []
+        content = latest_assistant.content or ""
+        lowered = content.lower()
+
+        if '錯誤' in content or '失敗' in content:
+            base_score -= 20
+            feedback.append('偵測到錯誤或失敗訊息，建議檢查輸出。')
+        if '警告' in content or 'warning' in lowered:
+            base_score -= 5
+            feedback.append('輸出中含有警告訊息，可視情況調整。')
+        if len(content) < 60:
+            base_score -= 5
+            feedback.append('回覆較為精簡，確認是否需要補充細節。')
+
+        base_score = max(0, min(100, base_score))
+        feedback_text = '；'.join(feedback) if feedback else '回覆結構完整，可持續迭代細部功能。'
+        return base_score, feedback_text
+
+    @staticmethod
+    def aggregate_token_usage(messages: List[ConversationMessage]) -> Dict[str, int]:
+        totals = {
+            'prompt_token_count': 0,
+            'candidates_token_count': 0,
+            'thoughts_token_count': 0,
+            'total_token_count': 0
+        }
+
+        for msg in messages:
+            if msg.usage_metadata:
+                for key in totals.keys():
+                    totals[key] += int(msg.usage_metadata.get(key, 0) or 0)
+
+        return totals
+
+    @staticmethod
+    def build_prompt_context(conversation: ProjectConversation) -> str:
+        summary = conversation.summary or MemoryEngine.build_summary(conversation.messages)
+        stm = conversation.short_term_memory or MemoryEngine.build_short_term_memory(conversation.messages)
+        ltm = conversation.long_term_memory or []
+
+        stm_lines = [f"- {('使用者' if item.get('role') == 'user' else '助手')}：{item.get('content')}" for item in stm]
+        ltm_lines = [f"• {memory.get('title')}: {MemoryEngine._clean_text(memory.get('detail', ''), 160)}" for memory in ltm]
+
+        context_sections = [
+            "=== 核心記憶摘要 ===",
+            f"專案總結：{summary}"
+        ]
+
+        if stm_lines:
+            context_sections.append("\n=== 短期記憶 (STM) ===")
+            context_sections.extend(stm_lines)
+
+        if ltm_lines:
+            context_sections.append("\n=== 長期記憶 (LTM) ===")
+            context_sections.extend(ltm_lines)
+
+        if conversation.memory_notes:
+            context_sections.append("\n=== 記憶備註 ===")
+            context_sections.append(conversation.memory_notes)
+
+        context_sections.append("\n=== 評分規則提醒 ===")
+        context_sections.append("請在輸出結尾提供品質評分與精簡評語，並根據需求更新記憶內容。")
+
+        return "\n".join(context_sections)
+
+    @staticmethod
+    def refresh_conversation(conversation: ProjectConversation, meta: Optional[Dict] = None) -> ProjectConversation:
+        conversation.summary = MemoryEngine.build_summary(conversation.messages)
+        conversation.short_term_memory = MemoryEngine.build_short_term_memory(conversation.messages)
+        MemoryEngine.update_long_term_memory(conversation)
+
+        if meta:
+            score = meta.get('quality_score')
+            comment = meta.get('quality_summary') or meta.get('quality_comment')
+            memory_note = meta.get('memory_notes')
+            if score is not None:
+                conversation.quality_score = int(score)
+            if comment:
+                conversation.quality_notes = comment
+            if memory_note:
+                conversation.memory_notes = memory_note
+
+        if conversation.quality_score is None or conversation.quality_notes is None:
+            evaluated_score, evaluated_notes = MemoryEngine.evaluate_quality(conversation.messages)
+            conversation.quality_score = conversation.quality_score or evaluated_score
+            conversation.quality_notes = conversation.quality_notes or evaluated_notes
+
+        if not conversation.memory_notes and conversation.long_term_memory:
+            conversation.memory_notes = conversation.long_term_memory[0].get('detail')
+
+        return conversation
 
 @dataclass
 class ProcessResult:
@@ -211,6 +420,16 @@ class ProcessResult:
     is_iteration: bool = False
     usage_metadata: Optional[Dict] = None
     terminal_output: str = ""
+    conversation_summary: str = ""
+    short_term_memory: List[Dict] = field(default_factory=list)
+    long_term_memory: List[Dict] = field(default_factory=list)
+    quality_score: Optional[int] = None
+    quality_feedback: Optional[str] = None
+    memory_notes: Optional[str] = None
+    token_usage_totals: Dict[str, int] = field(default_factory=dict)
+    user_terminal_snapshot: Optional[str] = None
+    message_metadata: Optional[Dict] = None
+    message_attachments: List[Dict] = field(default_factory=list)
 
 # ============================================
 # JSON Schema 定義 - 繁體中文化
@@ -250,6 +469,16 @@ def get_json_schema():
                         "web_title": {"type": ["string", "null"], "description": "網頁標題"}
                     },
                     "required": ["filename", "filetype", "code", "opens_window"]
+                }
+            },
+            "meta": {
+                "type": "object",
+                "description": "評分與記憶補充資訊",
+                "properties": {
+                    "quality_score": {"type": "integer", "minimum": 0, "maximum": 100, "description": "AI 對本次輸出的自評分數"},
+                    "quality_summary": {"type": "string", "description": "對品質的精簡評語"},
+                    "memory_notes": {"type": "string", "description": "需寫入長期記憶的關鍵要點"},
+                    "next_steps": {"type": "array", "items": {"type": "string"}, "description": "後續建議行動"}
                 }
             }
         },
@@ -350,6 +579,11 @@ python, javascript, html, css, typescript, java, cpp, c, go, rust, ruby, php, sw
    - API 端點可訪問
    - 前後端數據交互正常
 
+=== 核心回應規則 ===
+1. 所有輸出必須遵守「AI Assistant Core Directives」: 先呈現主要內容,再以分隔線與評分資訊結尾。
+2. 若提供 meta 欄位,請確保 quality_score 為 0-100 之間的整數,並給出繁體中文精簡評語。
+3. memory_notes 與 next_steps 用於更新記憶模組,請聚焦於可長期留存的重點與後續行動。
+
 Terminal 輸出和除錯資訊:
 1. 所有重要的執行步驟都應該有 print() 或 console.log() 輸出
 2. 包含適當的錯誤處理和錯誤訊息輸出
@@ -436,10 +670,16 @@ class ConversationManager:
                 project_dir=project_dir,
                 project_name=project_name,
                 created_at=datetime.now().isoformat(),
-                updated_at=datetime.now().isoformat()
+                updated_at=datetime.now().isoformat(),
+                summary="",
+                short_term_memory=[],
+                long_term_memory=[],
+                quality_score=None,
+                quality_notes=None,
+                memory_notes=None
             )
             return conv
-        
+
         try:
             with open(conv_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -460,13 +700,19 @@ class ConversationManager:
                         terminal_output=msg_data.get('terminal_output'),
                         usage_metadata=usage_metadata  # ⭐ 直接保存
                     ))
-                
+
                 return ProjectConversation(
                     project_dir=data['project_dir'],
                     project_name=data['project_name'],
                     messages=messages,
                     created_at=data.get('created_at', ''),
-                    updated_at=data.get('updated_at', '')
+                    updated_at=data.get('updated_at', ''),
+                    summary=data.get('summary', ''),
+                    short_term_memory=data.get('short_term_memory', []),
+                    long_term_memory=data.get('long_term_memory', []),
+                    quality_score=data.get('quality_score'),
+                    quality_notes=data.get('quality_notes'),
+                    memory_notes=data.get('memory_notes')
                 )
         except Exception as e:
             logger.error(f"載入對話歷史失敗: {e}")
@@ -474,16 +720,24 @@ class ConversationManager:
                 project_dir=project_dir,
                 project_name=Path(project_dir).name,
                 created_at=datetime.now().isoformat(),
-                updated_at=datetime.now().isoformat()
+                updated_at=datetime.now().isoformat(),
+                summary="",
+                short_term_memory=[],
+                long_term_memory=[],
+                quality_score=None,
+                quality_notes=None,
+                memory_notes=None
             )
-    
+
     @staticmethod
-    def save_conversation(conversation: ProjectConversation) -> bool:
+    def save_conversation(conversation: ProjectConversation, meta: Optional[Dict] = None) -> bool:
         """儲存對話歷史 - 正確序列化 usage_metadata"""
         try:
             conv_file = ConversationManager.get_conversation_file(conversation.project_dir)
             conversation.updated_at = datetime.now().isoformat()
-            
+
+            MemoryEngine.refresh_conversation(conversation, meta)
+
             # ⭐ 關鍵修復：使用自定義序列化保留 usage_metadata
             messages_data = []
             for msg in conversation.messages:
@@ -503,12 +757,18 @@ class ConversationManager:
                 'project_name': conversation.project_name,
                 'messages': messages_data,
                 'created_at': conversation.created_at,
-                'updated_at': conversation.updated_at
+                'updated_at': conversation.updated_at,
+                'summary': conversation.summary,
+                'short_term_memory': conversation.short_term_memory,
+                'long_term_memory': conversation.long_term_memory,
+                'quality_score': conversation.quality_score,
+                'quality_notes': conversation.quality_notes,
+                'memory_notes': conversation.memory_notes
             }
-            
+
             with open(conv_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-            
+
             logger.info(f"對話歷史已儲存: {conversation.project_name}")
             return True
         except Exception as e:
@@ -531,9 +791,14 @@ class ConversationManager:
             terminal_output=terminal_output,
             usage_metadata=usage_metadata  # ⭐ 直接保存
         )
-        
+
         conversation.messages.append(message)
-        ConversationManager.save_conversation(conversation)
+        meta_payload = None
+        if metadata and isinstance(metadata, dict):
+            meta_payload = metadata.get('meta')
+
+        ConversationManager.save_conversation(conversation, meta_payload)
+        return conversation
     
     @staticmethod
     def delete_conversation_file(project_dir: str) -> bool:
@@ -715,12 +980,12 @@ class GeminiAI:
             raise ValueError(f"不支持的連接模式: {config.connection_method}")
     
     @staticmethod
-    def generate_content(prompt: str, config: AIConfig, files: List[Dict] = None, 
-                        terminal_output: str = None) -> Tuple[str, Optional[Dict], Optional[Dict]]:
+    def generate_content(prompt: str, config: AIConfig, files: List[Dict] = None,
+                        terminal_output: str = None, memory_context: Optional[str] = None) -> Tuple[str, Optional[Dict], Optional[Dict]]:
         """呼叫 Gemini API 生成內容(支持檔案和Terminal輸出)"""
         try:
             GeminiAI.configure(config)
-            
+
             gen_params = dict(config.generation_params)
             gen_params["response_mime_type"] = "application/json"
             
@@ -761,9 +1026,13 @@ class GeminiAI:
             model_kwargs["generation_config"] = gen_config
             
             model = genai.GenerativeModel(**model_kwargs)
-            
+
             content_parts = []
-            
+
+            if memory_context:
+                content_parts.append(memory_context)
+                logger.info("已注入長短期記憶上下文")
+
             if terminal_output:
                 terminal_part = f"\n=== 程式執行輸出 (Terminal Output) ===\n{terminal_output}\n=== 輸出結束 ===\n"
                 content_parts.append(terminal_part)
@@ -1665,6 +1934,22 @@ class ProcessManager:
         """執行完整的自動化流程 - 修復版"""
         
         result = ProcessResult(success=False, is_iteration=is_iteration)
+
+        def _safe_relative_path(path_str: Optional[str], base_dir: str) -> str:
+            if not path_str:
+                return ""
+            try:
+                base_path = Path(base_dir)
+                return str(Path(path_str).resolve().relative_to(base_path.resolve()))
+            except Exception:
+                try:
+                    return Path(path_str).name
+                except Exception:
+                    return str(path_str)
+
+        def _guess_attachment_type(filename: str) -> str:
+            guessed, _ = mimetypes.guess_type(filename or "")
+            return guessed or 'text/plain'
         
         try:
             if is_iteration:
@@ -1683,15 +1968,18 @@ class ProcessManager:
                 if terminal_output:
                     logger.info("已附加Terminal輸出到AI請求")
                     result.terminal_output = terminal_output
-            
+                    result.user_terminal_snapshot = terminal_output
+
             # ⭐ 修復:在正確的時機保存用戶消息
-            ConversationManager.add_message(
+            conversation_after_user = ConversationManager.add_message(
                 folder_path,
                 'user',
                 prompt,
                 files=[{'name': f.get('name'), 'type': f.get('type')} for f in (files or [])],
                 terminal_output=terminal_output
             )
+
+            memory_context = MemoryEngine.build_prompt_context(conversation_after_user)
             
             if is_iteration and attach_screenshot:
                 project_info = ProjectManager.load_project_info(folder_path)
@@ -1760,12 +2048,25 @@ class ProcessManager:
                 logger.info("包含 Terminal 輸出")
             
             ai_response, json_data, usage_metadata = GeminiAI.generate_content(
-                prompt, config, files, terminal_output
+                prompt, config, files, terminal_output, memory_context
             )
             result.ai_response = ai_response
             result.ai_response_json = json_data
             result.usage_metadata = usage_metadata
-            
+
+            meta_info = {}
+            if isinstance(result.ai_response_json, dict):
+                meta_info = result.ai_response_json.get('meta') or {}
+                if meta_info.get('quality_score') is not None:
+                    try:
+                        result.quality_score = int(meta_info.get('quality_score'))
+                    except (TypeError, ValueError):
+                        result.quality_score = None
+                if meta_info.get('quality_summary') or meta_info.get('quality_comment'):
+                    result.quality_feedback = meta_info.get('quality_summary') or meta_info.get('quality_comment')
+                if meta_info.get('memory_notes'):
+                    result.memory_notes = meta_info.get('memory_notes')
+
             logger.info("Step 2: 解析 AI 回應...")
             try:
                 if json_data:
@@ -1848,8 +2149,17 @@ class ProcessManager:
             # Step 5: 儲存專案檔案
             logger.info("Step 5: 儲存專案檔案...")
             saved_files, updated_files = CodeProcessor.save_project_files(folder_path, project, is_iteration)
-            result.files_created = saved_files
-            result.files_updated = updated_files
+
+            result.files_created = [
+                _safe_relative_path(path, final_project_dir)
+                for path in saved_files
+                if path
+            ]
+            result.files_updated = [
+                _safe_relative_path(path, final_project_dir)
+                for path in updated_files
+                if path
+            ]
             
             # ⭐ 關鍵修復:確定最終的專案目錄
             if is_iteration:
@@ -2049,17 +2359,72 @@ class ProcessManager:
             result.success = True
             
             # ⭐ 關鍵修復:使用最終路徑和正確的 usage_metadata 保存AI回應
+            assistant_attachments: List[Dict[str, Any]] = []
+            for created in result.files_created:
+                if created:
+                    assistant_attachments.append({
+                        'name': created,
+                        'type': _guess_attachment_type(created),
+                        'label': '新增檔案'
+                    })
+            for updated in result.files_updated:
+                if updated:
+                    assistant_attachments.append({
+                        'name': updated,
+                        'type': _guess_attachment_type(updated),
+                        'label': '更新檔案'
+                    })
+            screenshot_names = []
+            for screenshot in result.screenshots:
+                name = Path(screenshot).name if screenshot else ''
+                if name:
+                    screenshot_names.append(name)
+                    assistant_attachments.append({
+                        'name': name,
+                        'type': 'image/png',
+                        'label': '截圖',
+                        'url': f"/screenshot/{name}"
+                    })
+
+            assistant_metadata = {
+                'project_name': project.project_name,
+                'files_count': len(project.files),
+                'meta': meta_info,
+                'quality_score': result.quality_score,
+                'quality_feedback': result.quality_feedback,
+                'memory_notes': result.memory_notes,
+                'attachments': assistant_attachments,
+                'files_created': result.files_created,
+                'files_updated': result.files_updated,
+                'screenshots': screenshot_names
+            }
+
             ConversationManager.add_message(
                 final_project_dir,  # ✅ 使用最終專案路徑
                 'assistant',
                 result.output,
-                metadata={
-                    'project_name': project.project_name,
-                    'files_count': len(project.files)
-                },
+                files=assistant_attachments,
+                metadata=assistant_metadata,
                 terminal_output=result.terminal_output,
                 usage_metadata=usage_metadata  # ⭐ 直接傳遞 usage_metadata
             )
+
+            updated_conversation = ConversationManager.load_conversation(final_project_dir)
+            result.conversation_summary = updated_conversation.summary
+            result.short_term_memory = updated_conversation.short_term_memory
+            result.long_term_memory = updated_conversation.long_term_memory
+            aggregate_tokens = MemoryEngine.aggregate_token_usage(updated_conversation.messages)
+            result.token_usage_totals = aggregate_tokens
+
+            result.message_metadata = assistant_metadata
+            result.message_attachments = assistant_attachments
+
+            if updated_conversation.quality_score is not None:
+                result.quality_score = updated_conversation.quality_score
+            if updated_conversation.quality_notes:
+                result.quality_feedback = updated_conversation.quality_notes
+            if updated_conversation.memory_notes:
+                result.memory_notes = updated_conversation.memory_notes
             
         except Exception as e:
             result.error = str(e)
@@ -2180,6 +2545,8 @@ def load_project():
             }
             messages_data.append(msg_dict)
         
+        token_usage_snapshot = MemoryEngine.aggregate_token_usage(conversation.messages)
+
         return jsonify({
             'success': True,
             'project_info': project_info,
@@ -2189,7 +2556,14 @@ def load_project():
             'conversation': {
                 'messages': messages_data,
                 'created_at': conversation.created_at,
-                'updated_at': conversation.updated_at
+                'updated_at': conversation.updated_at,
+                'summary': conversation.summary,
+                'short_term_memory': conversation.short_term_memory,
+                'long_term_memory': conversation.long_term_memory,
+                'quality_score': conversation.quality_score,
+                'quality_notes': conversation.quality_notes,
+                'memory_notes': conversation.memory_notes,
+                'token_usage': token_usage_snapshot
             }
         })
         
@@ -2223,13 +2597,22 @@ def get_conversation(project_dir):
             }
             messages_data.append(msg_dict)
         
+        token_usage_snapshot = MemoryEngine.aggregate_token_usage(conversation.messages)
+
         return jsonify({
             'success': True,
             'conversation': {
                 'project_name': conversation.project_name,
                 'messages': messages_data,
                 'created_at': conversation.created_at,
-                'updated_at': conversation.updated_at
+                'updated_at': conversation.updated_at,
+                'summary': conversation.summary,
+                'short_term_memory': conversation.short_term_memory,
+                'long_term_memory': conversation.long_term_memory,
+                'quality_score': conversation.quality_score,
+                'quality_notes': conversation.quality_notes,
+                'memory_notes': conversation.memory_notes,
+                'token_usage': token_usage_snapshot
             }
         })
     except Exception as e:
@@ -2324,9 +2707,23 @@ def run_process():
             'screenshots': result.screenshots,
             'is_iteration': result.is_iteration,
             'usage_metadata': result.usage_metadata,
-            'terminal_output': result.terminal_output
+            'terminal_output': result.terminal_output,
+            'memory_snapshot': {
+                'summary': result.conversation_summary,
+                'short_term_memory': result.short_term_memory,
+                'long_term_memory': result.long_term_memory,
+                'quality_score': result.quality_score,
+                'quality_feedback': result.quality_feedback,
+                'memory_notes': result.memory_notes,
+                'token_usage': result.token_usage_totals
+            },
+            'message_metadata': result.message_metadata,
+            'message_attachments': result.message_attachments
         }
-        
+
+        if result.user_terminal_snapshot:
+            response_data['user_terminal_snapshot'] = result.user_terminal_snapshot
+
         if result.project_data:
             response_data['project'] = {
                 'name': result.project_data.project_name,

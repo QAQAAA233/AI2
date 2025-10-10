@@ -13,6 +13,17 @@ let allProjects = [];
 let modelConfig = null;
 let sidebarCollapsed = false;
 let MODEL_LIMITS = {};
+let conversationInsights = null;
+let lastUserMessageElement = null;
+let cachedTokenThreshold = 120000;
+let tokenThresholdTriggered = false;
+let tokenUsageSnapshot = {
+    prompt_token_count: 0,
+    candidates_token_count: 0,
+    thoughts_token_count: 0,
+    total_token_count: 0
+};
+let conversationRefreshTimer = null;
 
 // ============================================
 // Loading Overlay 控制 - 修復版
@@ -95,6 +106,15 @@ async function loadConfig() {
             'gemini-1.5-flash': { name: 'Gemini 1.5 Flash', inputLimit: 1048576, outputLimit: 8192 }
         };
         modelConfig = config;
+        const autoSettings = config.automation_settings || {};
+        cachedTokenThreshold = parseInt(autoSettings.token_reset_threshold || 120000);
+        tokenThresholdTriggered = false;
+        tokenUsageSnapshot = {
+            prompt_token_count: 0,
+            candidates_token_count: 0,
+            thoughts_token_count: 0,
+            total_token_count: 0
+        };
     } catch (error) {
         console.error('載入配置失敗:', error);
     }
@@ -327,7 +347,12 @@ async function handleSubmit() {
     document.getElementById('emptyState').style.display = 'none';
     document.getElementById('resultsContainer').style.display = 'block';
 
-    addMessage('user', prompt);
+    const submittedFiles = uploadedFiles.map(file => ({
+        name: file.name,
+        type: file.type || 'text/plain'
+    }));
+
+    lastUserMessageElement = addMessage('user', prompt, null, null, submittedFiles);
 
     input.value = '';
     updateSubmitButton();
@@ -355,8 +380,20 @@ async function handleSubmit() {
         const result = await response.json();
 
         if (result.success) {
-            addMessage('assistant', result.output, result.usage_metadata, result.terminal_output);
-            
+            addMessage(
+                'assistant',
+                result.output,
+                result.usage_metadata,
+                result.terminal_output,
+                result.message_attachments,
+                result.memory_snapshot,
+                result.message_metadata
+            );
+
+            if (result.user_terminal_snapshot) {
+                patchMessageWithTerminal(lastUserMessageElement, result.user_terminal_snapshot);
+            }
+
             if (result.project) {
                 currentProject = result.project;
                 if (result.ai_response_json) {
@@ -380,27 +417,45 @@ async function handleSubmit() {
             }
 
             showNotification(result.is_iteration ? '專案迭代成功!' : '專案創建成功!', 'success');
-            
+
             loadProjectsList();
+            updateConversationInsights(result.memory_snapshot);
+            checkTokenThreshold(result.memory_snapshot?.token_usage);
+
+            if (currentProjectDir) {
+                scheduleConversationRefresh();
+            }
+
             uploadedFiles = [];
             updateFilesPreview();
             updateAttachedFilesDisplay();
+            lastUserMessageElement = null;
         } else {
             addMessage('assistant', `✕ 執行失敗：${result.error || result.output}`);
             showNotification(`執行失敗：${result.error}`, 'error');
+            lastUserMessageElement = null;
+
+            if (currentProjectDir) {
+                scheduleConversationRefresh(2000);
+            }
         }
     } catch (error) {
         addMessage('assistant', `✕ 連接錯誤：${error}`);
         showNotification(`連接錯誤：${error}`, 'error');
+        lastUserMessageElement = null;
+
+        if (currentProjectDir) {
+            scheduleConversationRefresh(2000);
+        }
     } finally {
         hideLoading();
     }
 }
 
-function addMessage(role, content, usageMetadata = null, terminalOutput = null) {
+function addMessage(role, content, usageMetadata = null, terminalOutput = null, files = null, metaSnapshot = null, metadata = null, options = {}) {
     const container = document.getElementById('resultsContainer');
     if (!container) return;
-    
+
     const message = document.createElement('div');
     message.className = `result-message ${role} selectable`;
 
@@ -420,25 +475,96 @@ function addMessage(role, content, usageMetadata = null, terminalOutput = null) 
 
     const messageContent = document.createElement('div');
     messageContent.className = 'message-content selectable';
-    messageContent.textContent = content;
+
+    const messageText = document.createElement('pre');
+    messageText.className = 'message-text';
+    messageText.textContent = content || '';
+
+    messageContent.appendChild(messageText);
 
     message.appendChild(header);
     message.appendChild(messageContent);
-    
-    // ✅ Terminal輸出只顯示在用戶消息中
-    if (role === 'user' && terminalOutput && terminalOutput.trim()) {
+
+    const normalizedFiles = normalizeFilesForDisplay(files, metadata);
+    if (normalizedFiles.length > 0) {
+        const attachmentsBlock = document.createElement('div');
+        attachmentsBlock.className = 'message-attachments';
+
+        const title = document.createElement('div');
+        title.className = 'attachment-title';
+        title.textContent = `附件 (${normalizedFiles.length})`;
+
+        const list = document.createElement('div');
+        list.className = 'attachment-list';
+
+        normalizedFiles.forEach(file => {
+            const item = document.createElement('div');
+            item.className = 'attachment-item';
+
+            const iconSpan = document.createElement('span');
+            iconSpan.className = 'attachment-icon';
+            iconSpan.textContent = getFileIcon(file.name);
+
+            const infoWrap = document.createElement('div');
+            infoWrap.className = 'attachment-info';
+
+            const nameSpan = document.createElement('span');
+            nameSpan.className = 'attachment-name';
+            nameSpan.textContent = file.name;
+            infoWrap.appendChild(nameSpan);
+
+            if (file.label) {
+                const badge = document.createElement('span');
+                badge.className = 'attachment-badge';
+                badge.textContent = file.label;
+                infoWrap.appendChild(badge);
+            }
+
+            if (file.note) {
+                const noteSpan = document.createElement('span');
+                noteSpan.className = 'attachment-note';
+                noteSpan.textContent = file.note;
+                infoWrap.appendChild(noteSpan);
+            }
+
+            item.appendChild(iconSpan);
+            item.appendChild(infoWrap);
+
+            if (file.url) {
+                item.classList.add('attachment-clickable');
+                item.addEventListener('click', () => {
+                    window.open(file.url, '_blank', 'noopener');
+                });
+            }
+
+            list.appendChild(item);
+        });
+
+        attachmentsBlock.appendChild(title);
+        attachmentsBlock.appendChild(list);
+        message.appendChild(attachmentsBlock);
+    }
+
+    if (terminalOutput && terminalOutput.trim()) {
         const terminalSection = document.createElement('div');
         terminalSection.className = 'terminal-output-section';
-        terminalSection.innerHTML = `
-            <div class="terminal-header">
-                <span class="terminal-title">Terminal 輸出</span>
-            </div>
-            <div class="terminal-body selectable">${terminalOutput}</div>
-        `;
+
+        const headerEl = document.createElement('div');
+        headerEl.className = 'terminal-header';
+        const titleEl = document.createElement('span');
+        titleEl.className = 'terminal-title';
+        titleEl.textContent = 'Terminal 輸出';
+        headerEl.appendChild(titleEl);
+
+        const body = document.createElement('div');
+        body.className = 'terminal-body selectable';
+        body.textContent = terminalOutput;
+
+        terminalSection.appendChild(headerEl);
+        terminalSection.appendChild(body);
         message.appendChild(terminalSection);
     }
-    
-    // Token使用統計只顯示在AI回應中
+
     if (role === 'assistant' && usageMetadata && typeof usageMetadata === 'object') {
         const tokenUsage = document.createElement('div');
         tokenUsage.className = 'token-usage';
@@ -462,9 +588,492 @@ function addMessage(role, content, usageMetadata = null, terminalOutput = null) 
         `;
         message.appendChild(tokenUsage);
     }
-    
+
+    if (metaSnapshot && metaSnapshot.quality_score != null && role === 'assistant') {
+        const badge = document.createElement('div');
+        badge.className = 'token-chip';
+        badge.innerHTML = `<strong>評分</strong>${metaSnapshot.quality_score} / ${metaSnapshot.quality_feedback || '未提供說明'}`;
+        message.appendChild(badge);
+    }
+
     container.appendChild(message);
-    message.scrollIntoView({ behavior: 'smooth' });
+    if (options.scroll !== false) {
+        message.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }
+    return message;
+}
+
+function normalizeFilesForDisplay(files, metadata) {
+    const normalized = [];
+    const seen = new Set();
+
+    const pushFile = (file, fallback = {}) => {
+        if (!file) return;
+        if (typeof file === 'string') {
+            pushFile({ name: file }, fallback);
+            return;
+        }
+        const name = file.name || file.filename || file.path || file.filepath || '';
+        if (!name) return;
+        const label = file.label || file.status || fallback.label || '';
+        const note = file.note || file.description || fallback.note || '';
+        const key = `${name}|${label}|${note}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        normalized.push({
+            name,
+            type: file.type || file.filetype || fallback.type || 'text/plain',
+            label,
+            note,
+            url: file.url || file.href || fallback.url || null
+        });
+    };
+
+    if (Array.isArray(files)) {
+        files.forEach(file => pushFile(file));
+    }
+
+    if (metadata && typeof metadata === 'object') {
+        const metadataSources = [
+            { key: 'attachments', fallback: {} },
+            { key: 'files', fallback: {} },
+            { key: 'files_created', fallback: { label: '新增檔案' } },
+            { key: 'files_updated', fallback: { label: '更新檔案' } },
+            { key: 'generated_files', fallback: { label: '產出檔案' } },
+            { key: 'updated_files', fallback: { label: '更新檔案' } }
+        ];
+
+        metadataSources.forEach(({ key, fallback }) => {
+            const value = metadata[key];
+            if (Array.isArray(value)) {
+                value.forEach(item => pushFile(item, fallback));
+            }
+        });
+
+        if (Array.isArray(metadata.screenshots)) {
+            metadata.screenshots.forEach(item => {
+                if (typeof item === 'string') {
+                    pushFile({ name: item, type: 'image/png', label: '截圖', url: `/screenshot/${item}` });
+                } else if (item && typeof item === 'object') {
+                    pushFile({
+                        name: item.name || item.filename,
+                        type: item.type || 'image/png',
+                        label: item.label || '截圖',
+                        url: item.url || item.href || `/screenshot/${item.name || item.filename}`
+                    });
+                }
+            });
+        }
+    }
+
+    return normalized;
+}
+
+function getFileIcon(filename) {
+    if (!filename) return '📄';
+    const parts = filename.split('.');
+    const ext = parts.length > 1 ? parts.pop().toLowerCase() : '';
+    const iconMap = {
+        py: '🐍',
+        js: '🟨',
+        ts: '🟦',
+        json: '🗂️',
+        html: '🌐',
+        css: '🎨',
+        md: '📝',
+        txt: '📄',
+        png: '🖼️',
+        jpg: '🖼️',
+        jpeg: '🖼️',
+        svg: '🖼️',
+        pdf: '📕',
+        yml: '⚙️',
+        yaml: '⚙️',
+        sh: '💻'
+    };
+    return iconMap[ext] || '📄';
+}
+
+function patchMessageWithTerminal(messageElement, terminalOutput) {
+    if (!messageElement || !terminalOutput || !terminalOutput.trim()) return;
+    let terminalSection = messageElement.querySelector('.terminal-output-section');
+    if (!terminalSection) {
+        terminalSection = document.createElement('div');
+        terminalSection.className = 'terminal-output-section';
+
+        const headerEl = document.createElement('div');
+        headerEl.className = 'terminal-header';
+        const titleEl = document.createElement('span');
+        titleEl.className = 'terminal-title';
+        titleEl.textContent = 'Terminal 輸出';
+        headerEl.appendChild(titleEl);
+
+        const body = document.createElement('div');
+        body.className = 'terminal-body selectable';
+        body.textContent = terminalOutput;
+
+        terminalSection.appendChild(headerEl);
+        terminalSection.appendChild(body);
+        messageElement.appendChild(terminalSection);
+    } else {
+        const body = terminalSection.querySelector('.terminal-body');
+        if (body) {
+            body.textContent = terminalOutput;
+        }
+    }
+}
+
+function renderConversationHistory(conversation) {
+    const container = document.getElementById('resultsContainer');
+    if (!container) return;
+
+    container.innerHTML = '';
+
+    const messages = conversation?.messages || [];
+    if (!Array.isArray(messages) || messages.length === 0) {
+        lastUserMessageElement = null;
+        return;
+    }
+
+    messages.forEach((msg, index) => {
+        const metaSnapshot = msg?.metadata?.meta || null;
+        addMessage(
+            msg.role,
+            msg.content,
+            msg.usage_metadata,
+            msg.terminal_output,
+            msg.files,
+            metaSnapshot,
+            msg.metadata,
+            { scroll: index === messages.length - 1 }
+        );
+    });
+
+    lastUserMessageElement = null;
+}
+
+function cancelConversationRefreshTimer() {
+    if (conversationRefreshTimer) {
+        clearTimeout(conversationRefreshTimer);
+        conversationRefreshTimer = null;
+    }
+}
+
+function scheduleConversationRefresh(delay = 1500) {
+    cancelConversationRefreshTimer();
+    conversationRefreshTimer = setTimeout(() => {
+        refreshConversationFromServer();
+    }, Math.max(0, delay));
+}
+
+async function refreshConversationFromServer() {
+    if (!currentProjectDir) {
+        cancelConversationRefreshTimer();
+        return;
+    }
+
+    try {
+        const response = await fetch(`/conversation/${encodeURIComponent(currentProjectDir)}`);
+        const result = await response.json();
+
+        if (result.success) {
+            renderConversationHistory(result.conversation);
+            updateConversationInsights(result.conversation);
+            checkTokenThreshold(result.conversation?.token_usage, { skipAuto: true });
+        }
+    } catch (error) {
+        console.error('同步對話失敗:', error);
+    } finally {
+        conversationRefreshTimer = null;
+    }
+}
+
+function renderMemoryList(elementId, items, type = 'stm') {
+    const listEl = document.getElementById(elementId);
+    if (!listEl) return;
+    listEl.innerHTML = '';
+
+    if (!items || items.length === 0) {
+        const empty = document.createElement('li');
+        empty.textContent = '尚無紀錄。';
+        listEl.appendChild(empty);
+        return;
+    }
+
+    items.forEach(item => {
+        const li = document.createElement('li');
+
+        if (type === 'stm') {
+            const roleLabel = item.role === 'user' ? '使用者' : '助手';
+            li.textContent = `${roleLabel}：${item.content || ''}`;
+        } else {
+            if (item.tags && item.tags.length) {
+                const tagsRow = document.createElement('div');
+                item.tags.slice(0, 3).forEach(tag => {
+                    const span = document.createElement('span');
+                    span.className = 'memory-tag';
+                    span.textContent = tag;
+                    tagsRow.appendChild(span);
+                });
+                li.appendChild(tagsRow);
+            }
+
+            const detail = document.createElement('div');
+            detail.textContent = item.detail || item.title || '無內容';
+            li.appendChild(detail);
+        }
+
+        listEl.appendChild(li);
+    });
+}
+
+function renderTokenUsageFooter(tokenUsage) {
+    const footer = document.getElementById('tokenUsageFooter');
+    if (!footer) return;
+
+    footer.innerHTML = '';
+    const usage = tokenUsage || {};
+    const entries = [
+        { label: '輸入', value: usage.prompt_token_count || 0 },
+        { label: '輸出', value: usage.candidates_token_count || 0 },
+        { label: '思考', value: usage.thoughts_token_count || 0 },
+        { label: '總計', value: usage.total_token_count || 0 }
+    ];
+
+    entries.forEach(entry => {
+        const chip = document.createElement('div');
+        chip.className = 'token-chip';
+        chip.innerHTML = `<strong>${entry.label}</strong>${entry.value.toLocaleString()}`;
+        footer.appendChild(chip);
+    });
+}
+
+function getQualityScoreColor(score) {
+    if (Number.isNaN(score)) return '#9ca3af';
+    if (score >= 90) return '#0ea5e9';
+    if (score >= 75) return '#10a37f';
+    if (score >= 60) return '#f97316';
+    return '#ef4444';
+}
+
+function updateConversationInsights(insights) {
+    const container = document.getElementById('conversationInsights');
+    const banner = document.getElementById('tokenThresholdBanner');
+
+    if (!container) return;
+
+    if (!insights) {
+        conversationInsights = null;
+        container.style.display = 'none';
+        if (banner) banner.classList.remove('active');
+        tokenUsageSnapshot = {
+            prompt_token_count: 0,
+            candidates_token_count: 0,
+            thoughts_token_count: 0,
+            total_token_count: 0
+        };
+        const bannerText = document.getElementById('tokenBannerText');
+        if (bannerText) {
+            bannerText.textContent = '對話 token 尚未超出閾值。';
+        }
+        return;
+    }
+
+    conversationInsights = insights;
+    container.style.display = 'block';
+
+    const summaryEl = document.getElementById('insightSummary');
+    if (summaryEl) {
+        summaryEl.textContent = insights.summary || '尚未產生摘要。';
+    }
+
+    const badge = document.getElementById('qualityScoreBadge');
+    if (badge) {
+        if (insights.quality_score != null) {
+            badge.textContent = insights.quality_score;
+            badge.style.background = getQualityScoreColor(Number(insights.quality_score));
+        } else {
+            badge.textContent = '--';
+            badge.style.background = '#9ca3af';
+        }
+    }
+
+    const feedbackEl = document.getElementById('qualityFeedbackText');
+    if (feedbackEl) {
+        feedbackEl.textContent = insights.quality_feedback || '尚未產生評語。';
+    }
+
+    const notesEl = document.getElementById('memoryNotesText');
+    if (notesEl) {
+        if (insights.memory_notes) {
+            notesEl.style.display = 'block';
+            notesEl.textContent = insights.memory_notes;
+        } else {
+            notesEl.style.display = 'none';
+            notesEl.textContent = '';
+        }
+    }
+
+    renderMemoryList('stmList', insights.short_term_memory, 'stm');
+    renderMemoryList('ltmList', insights.long_term_memory, 'ltm');
+    renderTokenUsageFooter(insights.token_usage);
+
+    tokenUsageSnapshot = {
+        prompt_token_count: insights.token_usage?.prompt_token_count || 0,
+        candidates_token_count: insights.token_usage?.candidates_token_count || 0,
+        thoughts_token_count: insights.token_usage?.thoughts_token_count || 0,
+        total_token_count: insights.token_usage?.total_token_count || 0
+    };
+
+    const bannerText = document.getElementById('tokenBannerText');
+    if (bannerText) {
+        bannerText.textContent = `當前累積 ${tokenUsageSnapshot.total_token_count.toLocaleString()} tokens / 閾值 ${cachedTokenThreshold.toLocaleString()} tokens`;
+    }
+}
+
+function checkTokenThreshold(tokenUsage, options = {}) {
+    const { skipAuto = false } = options;
+    const banner = document.getElementById('tokenThresholdBanner');
+
+    if (!tokenUsage) {
+        if (banner) banner.classList.remove('active');
+        tokenThresholdTriggered = false;
+        return;
+    }
+
+    const total = parseInt(tokenUsage.total_token_count || 0, 10);
+
+    if (banner) {
+        if (total >= cachedTokenThreshold) {
+            banner.classList.add('active');
+        } else {
+            banner.classList.remove('active');
+        }
+    }
+
+    if (total < cachedTokenThreshold) {
+        tokenThresholdTriggered = false;
+        return;
+    }
+
+    if (!tokenThresholdTriggered && !skipAuto) {
+        tokenThresholdTriggered = true;
+        showTokenOverflowWarning(total);
+    } else if (!tokenThresholdTriggered && skipAuto) {
+        tokenThresholdTriggered = true;
+        const text = document.getElementById('tokenBannerText');
+        if (text) {
+            text.textContent = `對話累積 ${total.toLocaleString()} tokens，已超過設定閾值 ${cachedTokenThreshold.toLocaleString()} tokens。`;
+        }
+    } else {
+        const text = document.getElementById('tokenBannerText');
+        if (text) {
+            text.textContent = `對話累積 ${total.toLocaleString()} tokens，已超過設定閾值 ${cachedTokenThreshold.toLocaleString()} tokens。`;
+        }
+    }
+}
+
+function showTokenOverflowWarning(totalTokens) {
+    const banner = document.getElementById('tokenThresholdBanner');
+    if (banner) {
+        banner.classList.add('active');
+    }
+
+    const text = document.getElementById('tokenBannerText');
+    if (text) {
+        const safeTotal = Number(totalTokens) || 0;
+        text.textContent = `對話累積 ${safeTotal.toLocaleString()} tokens，已超過設定閾值 ${cachedTokenThreshold.toLocaleString()} tokens，建議重整對話。`;
+    }
+
+    tokenThresholdTriggered = true;
+    spawnTokenHelperWindow(totalTokens, true);
+}
+
+function spawnTokenHelperWindow(totalTokens, auto = false) {
+    try {
+        const helperWindow = window.open('', '_blank');
+        if (!helperWindow) {
+            if (auto) {
+                showNotification('瀏覽器阻擋了自動視窗，請允許快顯或手動點擊提醒按鈕。', 'warning');
+            }
+            return;
+        }
+
+        const summary = conversationInsights?.summary || '尚未產生摘要。';
+        const qualityScore = conversationInsights?.quality_score ?? '--';
+        const qualityFeedback = conversationInsights?.quality_feedback || '尚未產生評語。';
+        const stmItems = conversationInsights?.short_term_memory || [];
+        const ltmItems = conversationInsights?.long_term_memory || [];
+        const safeTotal = Number(totalTokens) || 0;
+
+        helperWindow.document.write(`<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>Token 閾值整理視窗</title>
+<style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; padding: 24px; background: #f7f7f8; color: #111827; }
+    h1 { margin-top: 0; font-size: 20px; }
+    section { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+    ul { padding-left: 18px; }
+    li { margin-bottom: 6px; line-height: 1.6; }
+    .badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 999px; font-weight: 600; }
+    .score { background: ${getQualityScoreColor(Number(qualityScore))}; color: #fff; }
+    .meta { font-size: 13px; color: #4b5563; }
+</style>
+</head>
+<body>
+<h1>Token 閾值提醒</h1>
+<section>
+    <div class="badge score">品質評分：${qualityScore}</div>
+    <p class="meta">累積 Tokens：${safeTotal.toLocaleString()} / 閾值 ${cachedTokenThreshold.toLocaleString()}</p>
+    <p>${qualityFeedback}</p>
+</section>
+<section>
+    <h2>摘要</h2>
+    <p>${summary}</p>
+</section>
+<section>
+    <h2>短期記憶</h2>
+    <ul>
+        ${stmItems.map(item => `<li>${item.role === 'user' ? '使用者' : '助手'}：${item.content || ''}</li>`).join('') || '<li>尚無紀錄。</li>'}
+    </ul>
+</section>
+<section>
+    <h2>長期記憶要點</h2>
+    <ul>
+        ${ltmItems.map(item => `<li>${item.detail || item.title || ''}</li>`).join('') || '<li>尚無紀錄。</li>'}
+    </ul>
+</section>
+<section>
+    <h2>建議行動</h2>
+    <ul>
+        <li>在主視窗中建立新對話以避免上下文過長。</li>
+        <li>參考上述摘要與記憶，撰寫新的指令或需求。</li>
+        <li>如果需要，可調整 Token 閾值設定以符合工作流程。</li>
+    </ul>
+</section>
+</body>
+</html>`);
+        helperWindow.document.close();
+    } catch (error) {
+        console.warn('無法開啟 Token 提醒視窗:', error);
+    }
+}
+
+function openTokenHelperWindow() {
+    if (!conversationInsights) {
+        showNotification('目前尚未產生可整理的對話記憶。', 'info');
+        return;
+    }
+    spawnTokenHelperWindow(tokenUsageSnapshot.total_token_count, false);
+}
+
+function dismissTokenBanner() {
+    const banner = document.getElementById('tokenThresholdBanner');
+    if (banner) {
+        banner.classList.remove('active');
+    }
 }
 
 function useSuggestion(text) {
@@ -486,8 +1095,9 @@ async function createNewProject() {
     try {
         const response = await fetch('/select-folder');
         const result = await response.json();
-        
+
         if (result.success && result.path) {
+            cancelConversationRefreshTimer();
             currentProjectDir = result.path;
             isIterationMode = false;
             
@@ -531,8 +1141,9 @@ async function selectExistingFolder() {
     try {
         const response = await fetch('/select-folder');
         const result = await response.json();
-        
+
         if (result.success && result.path) {
+            cancelConversationRefreshTimer();
             currentProjectDir = result.path;
             isIterationMode = true;
             
@@ -652,6 +1263,7 @@ function getTimeAgo(dateString) {
 }
 
 async function selectProject(project) {
+    cancelConversationRefreshTimer();
     currentProjectDir = project.path;
     isIterationMode = true;
     
@@ -711,17 +1323,11 @@ async function loadExistingProject(projectDir) {
             document.getElementById('currentProjectName').textContent = currentProject.name;
             displayProjectStructure(result.project_info.files);
             
-            if (result.conversation && result.conversation.messages) {
-                const container = document.getElementById('resultsContainer');
-                if (container) {
-                    container.innerHTML = '';
-                    
-                    for (const msg of result.conversation.messages) {
-                        addMessage(msg.role, msg.content, msg.usage_metadata, msg.terminal_output);
-                    }
-                }
-            }
-            
+            renderConversationHistory(result.conversation);
+
+            updateConversationInsights(result.conversation);
+            checkTokenThreshold(result.conversation?.token_usage, { skipAuto: true });
+
             return true;
         } else {
             return false;
@@ -819,7 +1425,8 @@ function resetToHome() {
     if (!confirm('確定要回到初始介面嗎？當前專案選擇將被清除。')) {
         return;
     }
-    
+
+    cancelConversationRefreshTimer();
     currentProjectDir = null;
     currentProject = null;
     isIterationMode = false;
@@ -835,10 +1442,20 @@ function resetToHome() {
     document.querySelectorAll('.project-item').forEach(item => {
         item.classList.remove('active');
     });
-    
+
     updateFilesPreview();
     updateAttachedFilesDisplay();
-    
+
+    updateConversationInsights(null);
+    dismissTokenBanner();
+    tokenUsageSnapshot = {
+        prompt_token_count: 0,
+        candidates_token_count: 0,
+        thoughts_token_count: 0,
+        total_token_count: 0
+    };
+    tokenThresholdTriggered = false;
+
     showNotification('已回到初始介面', 'info');
 }
 
@@ -867,7 +1484,13 @@ async function loadSettings() {
         document.getElementById('safetyHateSpeech').value = safetySettings.HARM_CATEGORY_HATE_SPEECH || 'BLOCK_MEDIUM_AND_ABOVE';
         document.getElementById('safetySexuallyExplicit').value = safetySettings.HARM_CATEGORY_SEXUALLY_EXPLICIT || 'BLOCK_MEDIUM_AND_ABOVE';
         document.getElementById('safetyDangerousContent').value = safetySettings.HARM_CATEGORY_DANGEROUS_CONTENT || 'BLOCK_MEDIUM_AND_ABOVE';
-        
+
+        const automationSettings = config.automation_settings || {};
+        const tokenField = document.getElementById('tokenThreshold');
+        const monitorField = document.getElementById('monitorInterval');
+        if (tokenField) tokenField.value = automationSettings.token_reset_threshold || 120000;
+        if (monitorField) monitorField.value = automationSettings.monitor_interval || 5;
+
         updateSliderValue('thinkingBudget');
         updateSliderValue('temperature');
         updateSliderValue('topP');
@@ -911,7 +1534,8 @@ async function saveSettings() {
                 auto_error_fix: false,
                 auto_optimize: false,
                 auto_test: false,
-                monitor_interval: 5
+                monitor_interval: parseInt(document.getElementById('monitorInterval').value) || 5,
+                token_reset_threshold: parseInt(document.getElementById('tokenThreshold').value) || 120000
             }
         };
 

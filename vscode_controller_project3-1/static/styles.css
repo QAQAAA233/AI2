@@ -860,8 +860,92 @@ body {
     font-size: 14px;
     line-height: 1.6;
     color: var(--text-primary);
-    white-space: pre-wrap;
     word-wrap: break-word;
+}
+
+.message-text {
+    white-space: pre-wrap;
+    font-family: inherit;
+}
+
+.message-attachments {
+    margin-top: 12px;
+    padding: 10px 12px;
+    background: var(--bg-primary);
+    border: 1px dashed var(--border-color);
+    border-radius: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.attachment-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.attachment-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.attachment-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    font-size: 12px;
+    color: var(--text-primary);
+    border: 1px solid var(--border-light);
+}
+
+.attachment-icon {
+    font-size: 14px;
+}
+
+.attachment-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    line-height: 1.4;
+}
+
+.attachment-name {
+    font-weight: 500;
+    word-break: break-all;
+}
+
+.attachment-badge {
+    display: inline-flex;
+    align-items: center;
+    width: fit-content;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: rgba(16, 163, 127, 0.12);
+    color: var(--primary-color);
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.attachment-note {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.attachment-clickable {
+    cursor: pointer;
+    transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.attachment-clickable:hover {
+    background: var(--bg-primary);
+    border-color: var(--primary-color);
 }
 
 .token-usage {
@@ -925,6 +1009,174 @@ body {
     line-height: 1.4;
     white-space: pre-wrap;
     word-wrap: break-word;
+}
+
+/* =================================== */
+/* 對話摘要與記憶面板 */
+/* =================================== */
+.conversation-insights {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-light);
+    border-radius: 16px;
+    padding: 20px;
+    margin: 0 auto 20px;
+    max-width: 900px;
+    box-shadow: var(--shadow-sm);
+}
+
+.insights-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    align-items: flex-start;
+    margin-bottom: 16px;
+}
+
+.insights-header h3 {
+    font-size: 18px;
+    margin-bottom: 6px;
+}
+
+.insight-summary {
+    font-size: 14px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+}
+
+.quality-score-badge {
+    min-width: 68px;
+    padding: 6px 12px;
+    border-radius: 12px;
+    text-align: center;
+    font-weight: 700;
+    color: white;
+    background: var(--primary-color);
+    box-shadow: var(--shadow-sm);
+}
+
+.insight-body {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 18px;
+}
+
+.insight-column h4 {
+    font-size: 14px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+}
+
+.memory-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.memory-list li {
+    background: var(--bg-secondary);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 13px;
+    color: var(--text-primary);
+    border: 1px solid var(--border-light);
+}
+
+.memory-tag {
+    display: inline-block;
+    padding: 2px 6px;
+    background: rgba(16, 163, 127, 0.12);
+    color: var(--primary-color);
+    border-radius: 6px;
+    font-size: 11px;
+    margin-right: 6px;
+}
+
+.memory-notes {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-primary);
+    padding: 10px 12px;
+    background: var(--bg-secondary);
+    border-radius: 10px;
+    border: 1px solid var(--border-light);
+}
+
+.token-usage-footer {
+    margin-top: 12px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.token-chip {
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    font-size: 12px;
+    color: var(--text-secondary);
+    border: 1px solid var(--border-light);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+}
+
+.token-chip strong {
+    color: var(--text-primary);
+}
+
+/* =================================== */
+/* Token 閾值提醒橫幅 */
+/* =================================== */
+.token-threshold-banner {
+    display: none;
+    background: #fef3c7;
+    border: 1px solid #fcd34d;
+    color: #92400e;
+    padding: 12px 16px;
+    border-radius: 12px;
+    margin: 12px auto;
+    max-width: 900px;
+    align-items: flex-start;
+    gap: 12px;
+}
+
+.token-threshold-banner.active {
+    display: flex;
+}
+
+.token-banner-icon {
+    font-size: 20px;
+}
+
+.token-banner-text {
+    flex: 1;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.token-banner-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.banner-btn {
+    border: none;
+    background: var(--primary-color);
+    color: white;
+    padding: 6px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 12px;
+}
+
+.banner-btn.secondary {
+    background: transparent;
+    color: #92400e;
+    border: 1px solid #fcd34d;
 }
 
 /* =================================== */
@@ -1071,6 +1323,29 @@ body {
     font-size: 11px;
     color: var(--text-secondary);
     margin-top: 6px;
+}
+
+.number-input-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.number-input-group .form-input {
+    flex: 1;
+}
+
+.input-suffix {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.form-hint {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 6px;
+    line-height: 1.5;
 }
 
 .slider {
