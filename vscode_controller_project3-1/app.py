@@ -17,6 +17,7 @@ import json
 import platform
 import logging
 import queue
+import copy
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
 from pathlib import Path
@@ -69,12 +70,13 @@ SCREENSHOT_DIR = CONFIG_DIR / 'screenshots'
 LOG_DIR = CONFIG_DIR / 'logs'
 PROJECTS_DIR = CONFIG_DIR / 'projects'
 CONVERSATIONS_DIR = CONFIG_DIR / 'conversations'
+MEMORY_DIR = CONFIG_DIR / 'memory'
 PROJECT_LIST_FILE = CONFIG_DIR / 'project_list.json'
 
 # 確保所有目錄都存在，並處理錯誤
 def ensure_directories():
     """確保所有必要的目錄都存在"""
-    directories = [CONFIG_DIR, SCREENSHOT_DIR, LOG_DIR, PROJECTS_DIR, CONVERSATIONS_DIR]
+    directories = [CONFIG_DIR, SCREENSHOT_DIR, LOG_DIR, PROJECTS_DIR, CONVERSATIONS_DIR, MEMORY_DIR]
     
     for directory in directories:
         try:
@@ -211,6 +213,7 @@ class ProcessResult:
     is_iteration: bool = False
     usage_metadata: Optional[Dict] = None
     terminal_output: str = ""
+    final_project_dir: Optional[str] = None
 
 # ============================================
 # JSON Schema 定義 - 繁體中文化
@@ -550,6 +553,191 @@ class ConversationManager:
             return False
 
 # ============================================
+# 記憶系統管理模塊
+# ============================================
+
+class MemoryManager:
+    """長短期記憶與評分管理器"""
+
+    @staticmethod
+    def get_memory_file(project_dir: str) -> Path:
+        import hashlib
+        project_hash = hashlib.md5(project_dir.encode()).hexdigest()
+        return MEMORY_DIR / f"memory_{project_hash}.json"
+
+    @staticmethod
+    def _default_goals() -> List[Dict]:
+        return [
+            {"步驟": 1, "任務": "蒐集需求與建立環境", "狀態": "未開始", "是否為當前任務": True},
+            {"步驟": 2, "任務": "產出或更新核心功能", "狀態": "未開始", "是否為當前任務": False},
+            {"步驟": 3, "任務": "測試與驗證成果品質", "狀態": "未開始", "是否為當前任務": False},
+            {"步驟": 4, "任務": "整理文件並準備交付", "狀態": "未開始", "是否為當前任務": False}
+        ]
+
+    @staticmethod
+    def default_memory(project_dir: str, project_name: Optional[str] = None) -> Dict:
+        name = project_name or Path(project_dir).name
+        return {
+            "評分": 75,
+            "內容評價": "尚未產生任何 AI 回覆，等待首次互動建立基礎資料。",
+            "扣分原因": "無",
+            "改進建議": "請提交需求以建立記憶與任務追蹤。",
+            "核心記憶模塊": {
+                "專案總結": f"{name} 專案尚未建立詳細摘要。",
+                "短期記憶": "尚無近期互動記錄。",
+                "長期記憶": "尚未累積長期經驗。",
+                "專案目標": MemoryManager._default_goals()
+            },
+            "_meta": {
+                "history": [],
+                "long_term_notes": []
+            }
+        }
+
+    @staticmethod
+    def _sanitize(memory: Dict) -> Dict:
+        sanitized = copy.deepcopy(memory)
+        sanitized.pop('_meta', None)
+        return sanitized
+
+    @staticmethod
+    def load(project_dir: str, project_name: Optional[str] = None, raw: bool = False) -> Dict:
+        memory_file = MemoryManager.get_memory_file(project_dir)
+
+        if not memory_file.exists():
+            memory = MemoryManager.default_memory(project_dir, project_name)
+            MemoryManager.save(project_dir, memory)
+            return memory if raw else MemoryManager._sanitize(memory)
+
+        try:
+            with open(memory_file, 'r', encoding='utf-8') as f:
+                memory = json.load(f)
+        except Exception as e:
+            logger.error(f"讀取記憶檔案失敗: {e}")
+            memory = MemoryManager.default_memory(project_dir, project_name)
+
+        if '_meta' not in memory:
+            memory['_meta'] = {"history": [], "long_term_notes": []}
+
+        return memory if raw else MemoryManager._sanitize(memory)
+
+    @staticmethod
+    def save(project_dir: str, memory: Dict) -> None:
+        memory_file = MemoryManager.get_memory_file(project_dir)
+        with open(memory_file, 'w', encoding='utf-8') as f:
+            json.dump(memory, f, indent=2, ensure_ascii=False)
+
+    @staticmethod
+    def _truncate(text: str, length: int = 60) -> str:
+        if len(text) <= length:
+            return text
+        return text[:length - 1] + '…'
+
+    @staticmethod
+    def _set_goal_status(goals: List[Dict], step: int, status: str) -> None:
+        for goal in goals:
+            if goal.get('步驟') == step:
+                goal['狀態'] = status
+
+    @staticmethod
+    def _set_current_goal(goals: List[Dict], step: int) -> None:
+        for goal in goals:
+            goal['是否為當前任務'] = goal.get('步驟') == step
+
+    @staticmethod
+    def update_after_interaction(project_dir: str, user_prompt: str, result: ProcessResult) -> Dict:
+        project_name = None
+        project_description = None
+
+        if result.project_data:
+            project_name = result.project_data.project_name
+            project_description = result.project_data.description
+        else:
+            project_info = ProjectManager.load_project_info(project_dir)
+            if project_info:
+                project_name = project_info.get('project_name')
+                project_description = project_info.get('description')
+
+        memory = MemoryManager.load(project_dir, project_name, raw=True)
+
+        if project_description:
+            memory['核心記憶模塊']['專案總結'] = project_description
+        elif project_name:
+            memory['核心記憶模塊']['專案總結'] = f"專案 {project_name} 正在建構與優化中。"
+
+        meta = memory.setdefault('_meta', {})
+        history = meta.setdefault('history', [])
+        timestamp = datetime.now().strftime('%m/%d %H:%M')
+        prompt_preview = MemoryManager._truncate(user_prompt.replace('\n', ' '), 80)
+        outcome_text = '成功完成當前任務' if result.success else f"發生問題: {MemoryManager._truncate(result.error or '未知錯誤', 40)}"
+        history.append({
+            'timestamp': timestamp,
+            'prompt': prompt_preview,
+            'outcome': outcome_text
+        })
+        history[:] = history[-5:]
+
+        short_memory_lines = [
+            f"{item['timestamp']} - {item['prompt']} → {item['outcome']}"
+            for item in history[-3:]
+        ]
+        memory['核心記憶模塊']['短期記憶'] = ' / '.join(short_memory_lines) if short_memory_lines else '尚無近期互動記錄。'
+
+        long_term_notes = meta.setdefault('long_term_notes', [])
+        if result.success:
+            changed_files = len(result.files_created) + len(result.files_updated)
+            action_label = '迭代' if result.is_iteration else '初始交付'
+            note = f"{datetime.now().strftime('%m/%d')} 完成{action_label}，處理 {changed_files} 個檔案。"
+        else:
+            note = f"{datetime.now().strftime('%m/%d')} 需排查錯誤：{MemoryManager._truncate(result.error or '未知錯誤', 30)}"
+        long_term_notes.append(note)
+        long_term_notes[:] = long_term_notes[-6:]
+        memory['核心記憶模塊']['長期記憶'] = '；'.join(long_term_notes[-3:]) if long_term_notes else '尚未累積長期經驗。'
+
+        goals = memory['核心記憶模塊'].get('專案目標') or MemoryManager._default_goals()
+        # 確保結構完整
+        for goal in goals:
+            goal.setdefault('狀態', '未開始')
+            goal.setdefault('是否為當前任務', False)
+
+        if history:
+            MemoryManager._set_goal_status(goals, 1, '已完成')
+
+        if result.success:
+            MemoryManager._set_goal_status(goals, 2, '已完成')
+            MemoryManager._set_goal_status(goals, 3, '進行中')
+            MemoryManager._set_goal_status(goals, 4, '未開始')
+            MemoryManager._set_current_goal(goals, 3)
+        else:
+            MemoryManager._set_goal_status(goals, 2, '進行中')
+            MemoryManager._set_goal_status(goals, 3, '未開始')
+            MemoryManager._set_goal_status(goals, 4, '未開始')
+            MemoryManager._set_current_goal(goals, 2)
+
+        memory['核心記憶模塊']['專案目標'] = goals
+
+        previous_score = memory.get('評分', 75)
+        if result.success:
+            delta = 8 if (result.files_created or result.files_updated) else 5
+            score = min(100, previous_score + delta)
+            memory['內容評價'] = "本輪回覆順利完成任務並提供具體步驟，內容結構穩定。"
+            memory['扣分原因'] = "無"
+            if result.files_created or result.files_updated:
+                memory['改進建議'] = "建議後續針對更新內容進行測試，並同步補充文件。"
+            else:
+                memory['改進建議'] = "建議確認是否仍需新增程式碼或補充更多上下文資訊。"
+        else:
+            score = max(30, previous_score - 12)
+            memory['內容評價'] = "本輪回覆尚未完成需求，需優先處理錯誤訊息。"
+            memory['扣分原因'] = MemoryManager._truncate(result.error or '流程發生未知錯誤', 120)
+            memory['改進建議'] = "請依照錯誤提示調整程式或補充更多背景資訊，再次嘗試。"
+
+        memory['評分'] = score
+
+        MemoryManager.save(project_dir, memory)
+        return MemoryManager._sanitize(memory)
+
+# ============================================
 # 專案管理模塊
 # ============================================
 
@@ -592,7 +780,8 @@ class ProjectManager:
                     files_data.append({
                         'name': str(rel_path),
                         'type': 'text/plain',
-                        'content': content
+                        'content': content,
+                        'source': 'project'
                     })
                     logger.info(f"已載入檔案: {rel_path}")
                 except Exception as e:
@@ -1663,9 +1852,10 @@ class ProcessManager:
         attach_terminal: bool = False
     ) -> ProcessResult:
         """執行完整的自動化流程 - 修復版"""
-        
+
         result = ProcessResult(success=False, is_iteration=is_iteration)
-        
+        result.final_project_dir = folder_path
+
         try:
             if is_iteration:
                 logger.info("迭代模式:自動載入專案所有檔案")
@@ -1689,7 +1879,11 @@ class ProcessManager:
                 folder_path,
                 'user',
                 prompt,
-                files=[{'name': f.get('name'), 'type': f.get('type')} for f in (files or [])],
+                files=[{
+                    'name': f.get('name'),
+                    'type': f.get('type'),
+                    'source': f.get('source', 'user')
+                } for f in (files or [])],
                 terminal_output=terminal_output
             )
             
@@ -1856,6 +2050,7 @@ class ProcessManager:
                 final_project_dir = folder_path
             else:
                 final_project_dir = str(Path(folder_path) / project.project_name)
+            result.final_project_dir = final_project_dir
             
             # ⭐ 關鍵修復:處理對話遷移
             if not is_iteration and folder_path != final_project_dir:
@@ -2066,6 +2261,9 @@ class ProcessManager:
             logger.error(f"處理流程失敗: {e}")
             import traceback
             logger.error(traceback.format_exc())
+
+            if not result.final_project_dir:
+                result.final_project_dir = folder_path
             
             if not result.ai_response:
                 result.ai_response = "無法獲取 AI 回應"
@@ -2179,7 +2377,9 @@ def load_project():
                 'usage_metadata': msg.usage_metadata  # ⭐ 直接傳遞
             }
             messages_data.append(msg_dict)
-        
+
+        memory_snapshot = MemoryManager.load(project_dir, project_info.get('project_name'))
+
         return jsonify({
             'success': True,
             'project_info': project_info,
@@ -2190,7 +2390,8 @@ def load_project():
                 'messages': messages_data,
                 'created_at': conversation.created_at,
                 'updated_at': conversation.updated_at
-            }
+            },
+            'memory': memory_snapshot
         })
         
     except Exception as e:
@@ -2324,9 +2525,10 @@ def run_process():
             'screenshots': result.screenshots,
             'is_iteration': result.is_iteration,
             'usage_metadata': result.usage_metadata,
-            'terminal_output': result.terminal_output
+            'terminal_output': result.terminal_output,
+            'final_project_dir': result.final_project_dir or folder_path
         }
-        
+
         if result.project_data:
             response_data['project'] = {
                 'name': result.project_data.project_name,
@@ -2335,7 +2537,17 @@ def run_process():
                 'main_file': result.project_data.main_file,
                 'has_gui': any(f.opens_window for f in result.project_data.files)
             }
-        
+
+        final_dir = result.final_project_dir or folder_path
+        try:
+            response_data['memory'] = MemoryManager.update_after_interaction(
+                final_dir,
+                prompt,
+                result
+            )
+        except Exception as memory_error:
+            logger.error(f"更新記憶失敗: {memory_error}")
+
         return jsonify(response_data)
         
     except Exception as e:
@@ -2409,13 +2621,30 @@ def serve_screenshot(filename):
     filepath = SCREENSHOT_DIR / filename
     if filepath.exists():
         return send_file(
-            filepath, 
+            filepath,
             mimetype='image/png',
             as_attachment=False,
             download_name=filename
         )
     else:
         return "Screenshot not found", 404
+
+@app.route('/terminal-output', methods=['GET'])
+def get_terminal_output_snapshot():
+    """即時取得所有程式的 Terminal 輸出"""
+    try:
+        ProgramManager.update_outputs()
+        output = ProgramManager.get_all_terminal_output()
+        return jsonify({
+            'success': True,
+            'terminal_output': output
+        })
+    except Exception as e:
+        logger.error(f"獲取 Terminal 輸出失敗: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 @app.route('/running-programs', methods=['GET'])
 def get_running_programs():

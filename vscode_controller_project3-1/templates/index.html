@@ -156,30 +156,93 @@
                 </div>
             </div>
 
-            <div class="empty-state" id="emptyState">
-                <h1 class="empty-title">選擇或創建一個專案開始工作</h1>
+            <div class="conversation-layout">
+                <div class="conversation-column">
+                    <div class="empty-state" id="emptyState">
+                        <h1 class="empty-title">選擇或創建一個專案開始工作</h1>
 
-                <div class="suggestions-grid">
-                    <div class="suggestion-card" onclick="useSuggestion('創建一個待辦事項應用，使用 Flask 後端和現代化的前端界面')">
-                        <div class="suggestion-title">待辦事項應用</div>
-                        <div class="suggestion-desc">創建一個功能完整的待辦清單應用</div>
+                        <div class="suggestions-grid">
+                            <div class="suggestion-card" onclick="useSuggestion('創建一個待辦事項應用，使用 Flask 後端和現代化的前端界面')">
+                                <div class="suggestion-title">待辦事項應用</div>
+                                <div class="suggestion-desc">創建一個功能完整的待辦清單應用</div>
+                            </div>
+                            <div class="suggestion-card" onclick="useSuggestion('生成一個幾何藝術生成器，使用 Python 和 Tkinter')">
+                                <div class="suggestion-title">幾何藝術生成器</div>
+                                <div class="suggestion-desc">創建隨機幾何圖案的藝術程式</div>
+                            </div>
+                            <div class="suggestion-card" onclick="useSuggestion('開發一個簡單的聊天應用，支持多用戶即時通訊')">
+                                <div class="suggestion-title">即時聊天應用</div>
+                                <div class="suggestion-desc">使用 WebSocket 的聊天室</div>
+                            </div>
+                            <div class="suggestion-card" onclick="useSuggestion('創建一個資料視覺化儀表板，展示圖表和統計資料')">
+                                <div class="suggestion-title">資料儀表板</div>
+                                <div class="suggestion-desc">互動式資料分析和視覺化</div>
+                            </div>
+                        </div>
                     </div>
-                    <div class="suggestion-card" onclick="useSuggestion('生成一個幾何藝術生成器，使用 Python 和 Tkinter')">
-                        <div class="suggestion-title">幾何藝術生成器</div>
-                        <div class="suggestion-desc">創建隨機幾何圖案的藝術程式</div>
+
+                    <div class="results-container" id="resultsContainer" style="display: none;"></div>
+                </div>
+
+                <div class="memory-panel" id="memoryPanel" style="display: none;">
+                    <div class="memory-panel-header">
+                        <div>
+                            <h3 class="memory-title">記憶系統</h3>
+                            <span class="memory-subtitle">長短期記憶與評分改進</span>
+                        </div>
+                        <button class="memory-toggle-btn" onclick="toggleMemoryPanel()" type="button">
+                            <span id="memoryToggleText">收合</span>
+                            <svg class="icon-small" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="15 18 9 12 15 6"/>
+                            </svg>
+                        </button>
                     </div>
-                    <div class="suggestion-card" onclick="useSuggestion('開發一個簡單的聊天應用，支持多用戶即時通訊')">
-                        <div class="suggestion-title">即時聊天應用</div>
-                        <div class="suggestion-desc">使用 WebSocket 的聊天室</div>
-                    </div>
-                    <div class="suggestion-card" onclick="useSuggestion('創建一個資料視覺化儀表板，展示圖表和統計資料')">
-                        <div class="suggestion-title">資料儀表板</div>
-                        <div class="suggestion-desc">互動式資料分析和視覺化</div>
+
+                    <div class="memory-panel-body" id="memoryPanelBody">
+                        <div class="memory-score-card">
+                            <span class="score-label">評分</span>
+                            <span class="score-value" id="memoryScoreValue">--</span>
+                        </div>
+
+                        <div class="memory-section">
+                            <div class="memory-section-title">內容評價</div>
+                            <p class="memory-text" id="memoryContentReview">尚未產生任何 AI 回覆。</p>
+                        </div>
+                        <div class="memory-section">
+                            <div class="memory-section-title">扣分原因</div>
+                            <p class="memory-text" id="memoryDeduction">無</p>
+                        </div>
+                        <div class="memory-section">
+                            <div class="memory-section-title">改進建議</div>
+                            <p class="memory-text" id="memoryImprovement">請先提交需求以建立記憶。</p>
+                        </div>
+
+                        <div class="memory-divider"></div>
+
+                        <div class="memory-section">
+                            <div class="memory-section-title">專案總結</div>
+                            <p class="memory-text" id="memoryProjectSummary">尚未建立摘要。</p>
+                        </div>
+                        <div class="memory-section">
+                            <div class="memory-section-title">短期記憶</div>
+                            <p class="memory-text" id="memoryShortTerm">尚無近期互動記錄。</p>
+                        </div>
+                        <div class="memory-section">
+                            <div class="memory-section-title">長期記憶</div>
+                            <p class="memory-text" id="memoryLongTerm">尚未累積長期經驗。</p>
+                        </div>
+                        <div class="memory-section">
+                            <div class="memory-section-title">專案目標</div>
+                            <div class="memory-goals-list" id="memoryGoalsList">
+                                <div class="memory-goal-row pending">
+                                    <span class="goal-status">未開始</span>
+                                    <span class="goal-text">尚未設定目標</span>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
-
-            <div class="results-container" id="resultsContainer" style="display: none;"></div>
         </div>
 
         <div class="input-area">
@@ -216,6 +279,13 @@
                                     <line x1="12" y1="19" x2="20" y2="19"/>
                                 </svg>
                                 <span>附加 Terminal 輸出</span>
+                            </div>
+                            <div class="menu-item" id="memoryMenuItem" onclick="toggleAutoMemory()">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M4 4h16v16H4z"/>
+                                    <path d="M8 8h8M8 12h6M8 16h4"/>
+                                </svg>
+                                <span>附加上一輪記憶</span>
                             </div>
                             <div class="menu-divider"></div>
                             <div class="menu-item" onclick="showAdvancedSettings()">
