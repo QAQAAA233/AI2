@@ -205,12 +205,14 @@ class ProcessResult:
     project_data: Optional[ProjectOutput] = None
     ai_response: str = ""
     ai_response_json: Optional[Dict] = None
+    evaluation_data: Optional[Dict] = None
     installation_logs: List[str] = field(default_factory=list)
     error: str = ""
     screenshots: List[str] = field(default_factory=list)
     is_iteration: bool = False
     usage_metadata: Optional[Dict] = None
     terminal_output: str = ""
+    user_terminal_output: str = ""
 
 # ============================================
 # JSON Schema 定義 - 繁體中文化
@@ -226,6 +228,58 @@ def get_json_schema():
             "main_file": {"type": "string", "description": "主要執行檔案"},
             "setup_instructions": {"type": "array", "items": {"type": "string"}, "description": "設置指令"},
             "run_instructions": {"type": "array", "items": {"type": "string"}, "description": "執行指令"},
+            "評分": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "0-100 的整數分數"
+            },
+            "內容評價": {
+                "type": "string",
+                "maxLength": 200,
+                "description": "200 字以內的精簡評價"
+            },
+            "扣分原因": {
+                "type": "string",
+                "description": "若有扣分需說明原因,無則填寫『無』"
+            },
+            "改進建議": {
+                "type": "string",
+                "description": "針對不足提出的具體改進建議"
+            },
+            "核心記憶模塊": {
+                "type": "object",
+                "description": "整合長短期記憶與專案目標的資訊模塊",
+                "properties": {
+                    "專案總結": {"type": "string", "description": "回顧專案核心內容的摘要"},
+                    "短期記憶": {"type": "string", "description": "近期對話對當前任務的關鍵資訊"},
+                    "短期記憶 (STM)": {"type": "string", "description": "以 STM 形式保存的近期記憶重點"},
+                    "長期記憶": {"type": "string", "description": "專案背景、核心目標與重要限制"},
+                    "長期記憶 (LTM)": {"type": "string", "description": "以 LTM 形式保存的長期策略"},
+                    "專案目標": {
+                        "type": "array",
+                        "description": "分步列出的專案目標與執行狀態",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "步驟": {"type": "integer", "description": "任務步驟編號,從 1 開始"},
+                                "任務": {"type": "string", "description": "此步驟需要完成的具體任務"},
+                                "狀態": {
+                                    "type": "string",
+                                    "enum": ["未開始", "進行中", "已完成"],
+                                    "description": "任務當前狀態"
+                                },
+                                "是否為當前任務": {
+                                    "type": "boolean",
+                                    "description": "此步驟是否為當前優先任務"
+                                }
+                            },
+                            "required": ["步驟", "任務", "狀態", "是否為當前任務"]
+                        }
+                    }
+                },
+                "required": ["專案總結", "短期記憶", "長期記憶", "專案目標"]
+            },
             "files": {
                 "type": "array",
                 "items": {
@@ -253,25 +307,49 @@ def get_json_schema():
                 }
             }
         },
-        "required": ["project_name", "description", "files"]
+        "required": [
+            "project_name",
+            "description",
+            "files",
+            "評分",
+            "內容評價",
+            "扣分原因",
+            "改進建議",
+            "核心記憶模塊"
+        ]
     }
 
 def get_json_system_instruction():
     """獲取 JSON 模式的系統指令 - 繁體中文版 + Flask修復"""
-    return """你是一位專業的程式碼助手,能夠生成完整、可運行的專案程式碼。
+    return """你是一位專業的全端開發助手,需以繁體中文產出可立即執行的完整專案。請使用嚴格的 JSON 格式回覆,不得混入 Markdown、額外說明或無效欄位。
 
-回應時,你必須輸出一個符合以下結構的有效 JSON 物件:
+請建立單一 JSON 物件(若確有多專案需求可改以陣列包裹多個物件),並完整填入下列欄位:
 {
-    "project_name": "描述性的專案名稱",
-    "description": "專案功能的簡要描述",
+    "project_name": "專案名稱",
+    "description": "專案功能描述",
     "main_file": "main.py",
     "setup_instructions": ["pip install package1", "pip install package2"],
     "run_instructions": ["python main.py", "開啟瀏覽器前往 http://localhost:5000"],
+    "評分": 95,
+    "內容評價": "遵守需求並提供完善的程式碼。",
+    "扣分原因": "若有扣分請寫原因,無則填『無』",
+    "改進建議": "針對不足提出下輪可行的改進建議。",
+    "核心記憶模塊": {
+        "專案總結": "回顧此輪開發的核心成果。",
+        "短期記憶 (STM)": "列出最近幾輪對話中與當前任務直接相關的重點。",
+        "長期記憶 (LTM)": "整理專案背景、長期目標、重要限制或錯誤教訓。",
+        "專案目標": [
+            {"步驟": 1, "任務": "第一個具體任務", "狀態": "已完成", "是否為當前任務": false},
+            {"步驟": 2, "任務": "第二個具體任務", "狀態": "進行中", "是否為當前任務": true},
+            {"步驟": 3, "任務": "第三個具體任務", "狀態": "未開始", "是否為當前任務": false},
+            {"步驟": 4, "任務": "第四個具體任務", "狀態": "未開始", "是否為當前任務": false}
+        ]
+    },
     "files": [
         {
             "filename": "main.py",
             "filetype": "python",
-            "code": "import flask\\n\\napp = flask.Flask(__name__)\\n\\n@app.route('/')\\ndef home():\\n    return 'Hello World'\\n\\nif __name__ == '__main__':\\n    app.run(host='0.0.0.0', port=5000)",
+            "code": "import flask\n\napp = flask.Flask(__name__)\n\n@app.route('/')\ndef home():\n    return 'Hello World'\n\nif __name__ == '__main__':\n    app.run(host='0.0.0.0', port=5000)",
             "opens_window": false,
             "window_title": null,
             "install_requirements": ["pip install flask"],
@@ -286,76 +364,122 @@ def get_json_system_instruction():
     ]
 }
 
-重要格式要則:
-1. "code" 欄位必須包含正確格式化的程式碼,使用真實的換行符號和縮排
-2. 在 code 字串中使用實際的換行字元 (\\n) 和 Tab 字元 (\\t),不是文字上的 \\n 字串
-3. 程式碼必須是有效的 JSON 字串 - 正確跳脫引號
-4. 確保程式碼中的縮排正確保留
-5. 程式碼的每一行應該在 JSON 字串中獨立成行
+產出規範:
+1. 全部欄位必須使用有效 JSON,並以繁體中文撰寫描述文字。程式碼字串需正確跳脫,使用 \n 表示換行。
+2. "評分" 為 0-100 的整數; "內容評價" 最長 200 字,需同時評估規則遵守與內容品質; 若無扣分請回傳 "無"。
+3. "改進建議" 需指出下輪應優先改善的要點。
+4. "核心記憶模塊" 必須同時提供專案總結、短期記憶 (STM)、長期記憶 (LTM) 與至少四個依序編號的專案目標,並以布林值標記「是否為當前任務」。
+5. "files" 陣列中的每個物件都要填滿所有欄位,包含依賴、描述、執行方式與視窗資訊,不得留空。
 
-**CRITICAL Flask/Web Server 要則:**
-1. **絕對禁止使用 debug=True** - 這會導致在 subprocess 中運行時崩潰
-2. Flask 應用必須使用:`app.run(host='0.0.0.0', port=5000)` (不帶 debug 參數)
-3. Node.js/Express 應用也不要使用開發模式的熱重載
-4. 如果需要開發便利性,可以在代碼註釋中說明手動運行時可加 debug=True
+後端/伺服器規範:
+1. Flask 伺服器必須以 app.run(host='0.0.0.0', port=5000) 啟動,禁止使用 debug=True。
+2. 若需要 API、靜態資源或 CORS 設定,請完整給出實作。
 
-網頁應用要則:
-1. 對於 HTML 檔案或伺服器應用程式(Flask、Node.js 等),設定 "is_web_app": true
-2. 只有在你的程式碼包含自動開啟瀏覽器功能時,才設定 "can_open_standalone": true:
-   - Python: 使用 webbrowser.open() 或 Flask 加上 app.run(port=5000) + webbrowser
-   - Node.js: 使用 'open' 套件或類似工具
-   - HTML: 如果是可以直接開啟的獨立 HTML
-3. 如果 "can_open_standalone" 為 false 但 "is_web_app" 為 true,請提供:
-   - "server_address": 應用程式將運行的 URL(例如:"http://localhost:5000")
-   - "web_title": 網頁的標題
-4. 對於獨立的 HTML 檔案,將 opens_window 和 is_web_app 都設為 true
-5. 對於伺服器應用程式,控制器將處理開啟獨立瀏覽器視窗
+前端/介面規範:
+1. 若專案包含網頁或 GUI,需提供可直接開啟的完整 HTML/GUI 程式碼,並標註 web_title、server_address。
+2. 僅在程式會自動開啟視窗時, can_open_standalone 才能設為 true。
 
-重要要則:
-1. 始終生成完整、可運行的程式碼 - 不要使用佔位符或省略號
-2. 對於 GUI 應用程式(pygame/tkinter),設定視窗標題以匹配專案名稱
-3. 對於網頁應用,確保 HTML 有適當的 <title> 標籤
-4. 包含所有必要的匯入和錯誤處理
-5. 正確指定檔案類型(python、javascript、html 等)
-6. 對於 GUI 應用程式或獨立 HTML 檔案,將 opens_window 設為 true
-7. 在 install_requirements 中列出所有套件安裝命令
-8. 為每個檔案提供清晰的描述
-9. 對於多檔案專案,確保檔案正確連結
-
-支持的檔案類型:
-python, javascript, html, css, typescript, java, cpp, c, go, rust, ruby, php, swift, kotlin, sql, shell, yaml, json, xml, markdown, text
-
-記住:
-- 只輸出有效的 JSON,不要有額外的文字或 markdown 格式
-- 確保程式碼正確格式化,縮排正確
-- 在程式碼字串中使用真實的換行符號,而不是 \\n 文字
-- 對於網頁應用,仔細考慮獨立瀏覽器視窗的能力
-- **Flask/Web 伺服器絕對不要使用 debug=True**
-
-對於 HTML + 後端專案的特別注意事項:
-1. 確保後端伺服器(Flask/Node.js)正確配置 CORS 和靜態檔案服務
-2. HTML 檔案應該正確引用後端 API 端點
-3. 提供完整的前後端連接測試程式碼
-4. 在 run_instructions 中明確說明:
-   - 先啟動後端伺服器
-   - 後端服務地址
-   - 前端如何訪問
-5. 對於需要同時運行前後端的專案:
-   - 後端檔案設定 is_web_app: true, can_open_standalone: false
-   - 提供準確的 server_address 和 web_title
-   - 確保後端程式碼包含適當的路由和 CORS 設定
-   - **後端絕對不要使用 debug=True**
-6. 測試程式碼應該驗證:
-   - 後端伺服器啟動成功
-   - API 端點可訪問
-   - 前後端數據交互正常
-
-Terminal 輸出和除錯資訊:
-1. 所有重要的執行步驟都應該有 print() 或 console.log() 輸出
-2. 包含適當的錯誤處理和錯誤訊息輸出
-3. 啟動時輸出服務地址和狀態資訊
-4. 對於網頁應用,輸出 "伺服器運行於: http://localhost:PORT"
+一般注意事項:
+1. 嚴禁留空或以 TODO 等敷衍字樣代替程式碼。
+2. 確實列出安裝與執行指令,若有前後端需說明啟動順序與通訊端點。
+3. 請在程式中提供必要的日誌/提示,啟動時輸出伺服器位址,方便除錯。
+4. 僅能輸出 JSON 內容,不能出現 Markdown、自然語言解說或額外結尾語。
 """
+
+# ============================================
+# 評分與記憶資料處理
+# ============================================
+
+def normalize_json_payload(json_payload: Optional[Any]) -> Optional[Dict]:
+    """將 AI 回應標準化為單一字典"""
+    if isinstance(json_payload, dict):
+        return json_payload
+    if isinstance(json_payload, list):
+        for item in json_payload:
+            if isinstance(item, dict):
+                return item
+    return None
+
+
+def _normalize_boolean(value: Any) -> bool:
+    """將多種型別轉換為布林值"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        return normalized in {"true", "1", "yes", "y", "是", "當前", "目前"}
+    return False
+
+
+def extract_evaluation_data(json_payload: Optional[Any]) -> Optional[Dict]:
+    """從 AI JSON 回應中提取評分與記憶模塊資訊"""
+    payload = normalize_json_payload(json_payload)
+    if not isinstance(payload, dict):
+        return None
+
+    evaluation: Dict[str, Any] = {}
+
+    score = payload.get("評分")
+    if score is not None:
+        try:
+            evaluation["評分"] = int(score)
+        except (TypeError, ValueError):
+            evaluation["評分"] = score
+
+    for key in ["內容評價", "扣分原因", "改進建議"]:
+        if key in payload and payload.get(key) is not None:
+            value = payload.get(key)
+            if isinstance(value, str):
+                evaluation[key] = value.strip()
+            else:
+                evaluation[key] = value
+
+    core_module = payload.get("核心記憶模塊")
+    if isinstance(core_module, dict):
+        memory_module: Dict[str, Any] = {}
+
+        def get_memory_field(keys: List[str]) -> Optional[Any]:
+            for field_key in keys:
+                if field_key in core_module and core_module.get(field_key) not in (None, ""):
+                    return core_module.get(field_key)
+            return None
+
+        summary = get_memory_field(["專案總結"])
+        if summary is not None:
+            memory_module["專案總結"] = summary
+
+        short_term = get_memory_field(["短期記憶", "短期記憶 (STM)", "短期記憶( STM )", "短期記憶(STM)"])
+        if short_term is not None:
+            memory_module["短期記憶"] = short_term
+
+        long_term = get_memory_field(["長期記憶", "長期記憶 (LTM)", "長期記憶( LTM )", "長期記憶(LTM)"])
+        if long_term is not None:
+            memory_module["長期記憶"] = long_term
+
+        goals_data: List[Dict[str, Any]] = []
+        goals = core_module.get("專案目標")
+        if isinstance(goals, list):
+            for index, goal in enumerate(goals, start=1):
+                if not isinstance(goal, dict):
+                    continue
+
+                normalized_goal = {
+                    "步驟": goal.get("步驟", index),
+                    "任務": goal.get("任務"),
+                    "狀態": goal.get("狀態"),
+                    "是否為當前任務": _normalize_boolean(goal.get("是否為當前任務"))
+                }
+                goals_data.append(normalized_goal)
+
+        if goals_data:
+            memory_module["專案目標"] = goals_data
+
+        if memory_module:
+            evaluation["核心記憶模塊"] = memory_module
+
+    return evaluation if evaluation else None
 
 # ============================================
 # 配置管理模塊
@@ -516,7 +640,7 @@ class ConversationManager:
             return False
     
     @staticmethod
-    def add_message(project_dir: str, role: str, content: str, files: Optional[List[Dict]] = None, 
+    def add_message(project_dir: str, role: str, content: str, files: Optional[List[Dict]] = None,
                    metadata: Optional[Dict] = None, terminal_output: Optional[str] = None,
                    usage_metadata: Optional[Dict] = None):  # ⭐ 新增參數
         """添加消息到對話歷史 - 支持 usage_metadata"""
@@ -534,7 +658,7 @@ class ConversationManager:
         
         conversation.messages.append(message)
         ConversationManager.save_conversation(conversation)
-    
+
     @staticmethod
     def delete_conversation_file(project_dir: str) -> bool:
         """刪除對話檔案 - 用於清理臨時對話"""
@@ -548,6 +672,28 @@ class ConversationManager:
         except Exception as e:
             logger.error(f"刪除對話檔案失敗: {e}")
             return False
+
+    @staticmethod
+    def get_latest_evaluation(project_dir: str) -> Optional[Dict[str, Any]]:
+        """讀取對話歷史並取得最近的評分資料"""
+        try:
+            conv_file = ConversationManager.get_conversation_file(project_dir)
+            if not conv_file.exists():
+                return None
+
+            with open(conv_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            messages = data.get('messages', []) if isinstance(data, dict) else []
+            for msg in reversed(messages):
+                if not isinstance(msg, dict):
+                    continue
+                metadata = msg.get('metadata') or {}
+                if isinstance(metadata, dict) and metadata.get('evaluation'):
+                    return metadata.get('evaluation')
+        except Exception as e:
+            logger.warning(f"讀取專案評分資料失敗: {project_dir} - {e}")
+        return None
 
 # ============================================
 # 專案管理模塊
@@ -1122,10 +1268,14 @@ class CodeProcessor:
     def parse_json_response(json_data: Dict) -> ProjectOutput:
         """解析 JSON 格式的 AI 回應"""
         try:
+            payload = normalize_json_payload(json_data)
+            if not isinstance(payload, dict):
+                raise ValueError("JSON 回應為空或格式不正確")
+
             files = []
-            for file_data in json_data.get('files', []):
+            for file_data in payload.get('files', []):
                 code = file_data.get('code', '')
-                
+
                 if isinstance(code, str):
                     code = code.replace('\\n', '\n')
                     code = code.replace('\\t', '\t')
@@ -1149,14 +1299,14 @@ class CodeProcessor:
                 ))
             
             return ProjectOutput(
-                project_name=json_data.get('project_name', 'untitled_project'),
-                description=json_data.get('description', ''),
+                project_name=payload.get('project_name', 'untitled_project'),
+                description=payload.get('description', ''),
                 files=files,
-                main_file=json_data.get('main_file'),
-                setup_instructions=json_data.get('setup_instructions'),
-                run_instructions=json_data.get('run_instructions')
+                main_file=payload.get('main_file'),
+                setup_instructions=payload.get('setup_instructions'),
+                run_instructions=payload.get('run_instructions')
             )
-        
+
         except Exception as e:
             logger.error(f"解析 JSON 回應失敗: {e}")
             raise
@@ -1682,7 +1832,9 @@ class ProcessManager:
                 terminal_output = ProgramManager.get_all_terminal_output()
                 if terminal_output:
                     logger.info("已附加Terminal輸出到AI請求")
-                    result.terminal_output = terminal_output
+                    result.user_terminal_output = terminal_output
+                    if not result.terminal_output:
+                        result.terminal_output = terminal_output
             
             # ⭐ 修復:在正確的時機保存用戶消息
             ConversationManager.add_message(
@@ -1763,7 +1915,9 @@ class ProcessManager:
                 prompt, config, files, terminal_output
             )
             result.ai_response = ai_response
-            result.ai_response_json = json_data
+            normalized_json = normalize_json_payload(json_data)
+            result.ai_response_json = normalized_json
+            result.evaluation_data = extract_evaluation_data(normalized_json)
             result.usage_metadata = usage_metadata
             
             logger.info("Step 2: 解析 AI 回應...")
@@ -1781,8 +1935,12 @@ class ProcessManager:
                             json_str = json_str.replace('\\n', '\n')
                             json_str = json_str.replace('\\t', '\t')
                             potential_json = json.loads(json_str)
-                            project = CodeProcessor.parse_json_response(potential_json)
-                            result.ai_response_json = potential_json
+                            normalized_potential = normalize_json_payload(potential_json)
+                            if not isinstance(normalized_potential, dict):
+                                raise ValueError("JSON 結構無法標準化為物件")
+                            project = CodeProcessor.parse_json_response(normalized_potential)
+                            result.ai_response_json = normalized_potential
+                            result.evaluation_data = extract_evaluation_data(normalized_potential)
                             logger.info("成功從文本中提取並解析 JSON")
                         else:
                             raise ValueError("無法從回應中找到有效的JSON結構")
@@ -2055,7 +2213,8 @@ class ProcessManager:
                 result.output,
                 metadata={
                     'project_name': project.project_name,
-                    'files_count': len(project.files)
+                    'files_count': len(project.files),
+                    **({'evaluation': result.evaluation_data} if result.evaluation_data else {})
                 },
                 terminal_output=result.terminal_output,
                 usage_metadata=usage_metadata  # ⭐ 直接傳遞 usage_metadata
@@ -2179,7 +2338,14 @@ def load_project():
                 'usage_metadata': msg.usage_metadata  # ⭐ 直接傳遞
             }
             messages_data.append(msg_dict)
-        
+
+        latest_evaluation = None
+        for msg in reversed(conversation.messages):
+            metadata = msg.metadata or {}
+            if isinstance(metadata, dict) and metadata.get('evaluation'):
+                latest_evaluation = metadata.get('evaluation')
+                break
+
         return jsonify({
             'success': True,
             'project_info': project_info,
@@ -2190,7 +2356,8 @@ def load_project():
                 'messages': messages_data,
                 'created_at': conversation.created_at,
                 'updated_at': conversation.updated_at
-            }
+            },
+            'latest_evaluation': latest_evaluation
         })
         
     except Exception as e:
@@ -2245,9 +2412,18 @@ def get_projects():
     try:
         projects = ProjectManager.get_project_list()
         projects.sort(key=lambda x: x.get('last_accessed', ''), reverse=True)
+
+        projects_with_memory = []
+        for project in projects:
+            project_data = dict(project)
+            latest_evaluation = ConversationManager.get_latest_evaluation(project.get('path', ''))
+            if latest_evaluation:
+                project_data['latest_evaluation'] = latest_evaluation
+            projects_with_memory.append(project_data)
+
         return jsonify({
             'success': True,
-            'projects': projects
+            'projects': projects_with_memory
         })
     except Exception as e:
         logger.error(f"獲取專案列表失敗: {e}")
@@ -2319,12 +2495,14 @@ def run_process():
             'files_updated': result.files_updated,
             'ai_response': result.ai_response or '無 AI 回應',
             'ai_response_json': result.ai_response_json,
+            'evaluation': result.evaluation_data,
             'installation_logs': result.installation_logs,
             'error': result.error,
             'screenshots': result.screenshots,
             'is_iteration': result.is_iteration,
             'usage_metadata': result.usage_metadata,
-            'terminal_output': result.terminal_output
+            'terminal_output': result.terminal_output,
+            'user_terminal_output': result.user_terminal_output
         }
         
         if result.project_data:

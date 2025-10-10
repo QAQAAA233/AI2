@@ -179,7 +179,55 @@
                 </div>
             </div>
 
-            <div class="results-container" id="resultsContainer" style="display: none;"></div>
+            <div class="conversation-area" id="conversationArea" style="display: none;">
+                <div class="results-container" id="resultsContainer"></div>
+                <div class="memory-panel collapsed" id="memoryPanel">
+                    <div class="memory-panel-header">
+                        <div class="memory-panel-title">
+                            <div class="memory-panel-info">
+                                <span class="memory-panel-name">長短期記憶與評分</span>
+                                <span class="memory-panel-project" id="memoryPanelProject">尚未選擇專案</span>
+                            </div>
+                            <span class="memory-score" id="memoryScore">--</span>
+                        </div>
+                        <button class="memory-toggle-btn" id="memoryToggleBtn" onclick="toggleMemoryPanel()" aria-label="切換記憶面板">
+                            <span class="toggle-icon" id="memoryToggleIcon">◀</span>
+                        </button>
+                    </div>
+                    <div class="memory-panel-body" id="memoryContent">
+                        <div class="memory-empty" id="memoryEmpty">尚未產生記憶資料</div>
+                        <div class="memory-section memory-projects" id="memoryProjectsSection">
+                            <h4>專案記憶清單</h4>
+                            <div class="memory-project-list" id="memoryProjectList"></div>
+                        </div>
+                        <div class="memory-section" id="memoryEvaluationSection">
+                            <h4>評分摘要</h4>
+                            <p class="memory-feedback" id="memoryFeedback">尚未提供內容評價。</p>
+                            <div class="memory-detail-row" id="memoryDeduction">扣分原因：--</div>
+                            <div class="memory-detail-row" id="memoryAdvice">改進建議：--</div>
+                        </div>
+                        <div class="memory-section" id="memoryCoreSection">
+                            <h4>核心記憶模塊</h4>
+                            <div class="memory-block">
+                                <div class="memory-block-title">專案總結</div>
+                                <p id="memorySummary">--</p>
+                            </div>
+                            <div class="memory-block">
+                                <div class="memory-block-title">短期記憶 (STM)</div>
+                                <p id="memorySTM">--</p>
+                            </div>
+                            <div class="memory-block">
+                                <div class="memory-block-title">長期記憶 (LTM)</div>
+                                <p id="memoryLTM">--</p>
+                            </div>
+                            <div class="memory-block">
+                                <div class="memory-block-title">專案目標</div>
+                                <div class="memory-goal-list" id="memoryGoals"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <div class="input-area">
@@ -216,6 +264,13 @@
                                     <line x1="12" y1="19" x2="20" y2="19"/>
                                 </svg>
                                 <span>附加 Terminal 輸出</span>
+                            </div>
+                            <div class="menu-item" id="memoryMenuItem" onclick="insertPreviousMemory()">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 4a6 6 0 00-6 6v1H5a3 3 0 000 6h1v1a4 4 0 008 0v-1h1a3 3 0 000-6h-1v-1a6 6 0 00-6-6z"/>
+                                    <path d="M9 12h6M9 15h4"/>
+                                </svg>
+                                <span>插入上一輪記憶</span>
                             </div>
                             <div class="menu-divider"></div>
                             <div class="menu-item" onclick="showAdvancedSettings()">
