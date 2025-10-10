@@ -13,6 +13,9 @@ let allProjects = [];
 let modelConfig = null;
 let sidebarCollapsed = false;
 let MODEL_LIMITS = {};
+let latestMemoryBundle = null;
+let attachMemoryBundle = true;
+let memoryDrawerInitialized = false;
 
 // ============================================
 // Loading Overlay 控制 - 修復版
@@ -48,7 +51,9 @@ window.addEventListener('DOMContentLoaded', () => {
     loadProjectsList();
     checkRunningPrograms();
     setInterval(checkRunningPrograms, 5000);
-    
+    renderMemoryBundle(null);
+    updateMemoryMenuState();
+
     // 點擊外部關閉選單
     document.addEventListener('click', (e) => {
         const plusMenu = document.getElementById('plusMenu');
@@ -279,6 +284,228 @@ function toggleAttachTerminal() {
     togglePlusMenu();
 }
 
+function updateMemoryMenuState() {
+    const menuItem = document.getElementById('memoryMenuItem');
+    if (menuItem) {
+        if (attachMemoryBundle) {
+            menuItem.classList.add('active');
+        } else {
+            menuItem.classList.remove('active');
+        }
+    }
+}
+
+async function toggleMemoryAttachment() {
+    attachMemoryBundle = !attachMemoryBundle;
+    updateMemoryMenuState();
+    try {
+        if (attachMemoryBundle) {
+            await ensureMemoryBundle();
+            showNotification('已啟用自動附加記憶摘要', 'success');
+        } else {
+            showNotification('已關閉自動附加記憶摘要', 'info');
+        }
+    } catch (error) {
+        console.error('更新記憶附加狀態失敗:', error);
+        showNotification('更新記憶附加狀態時發生錯誤', 'error');
+    } finally {
+        togglePlusMenu();
+    }
+}
+
+function toggleMemoryDrawer() {
+    const drawer = document.getElementById('memoryDrawer');
+    if (!drawer) return;
+    const isCollapsed = drawer.classList.toggle('collapsed');
+    if (!isCollapsed) {
+        memoryDrawerInitialized = true;
+    }
+}
+
+function renderMemoryBundle(bundle, emptyMessage = '尚未載入記憶摘要，請選擇專案或發送請求。') {
+    const drawer = document.getElementById('memoryDrawer');
+    const content = document.getElementById('memoryContent');
+    if (!drawer || !content) return;
+
+    if (!bundle) {
+        content.innerHTML = `<div class="memory-empty">${emptyMessage}</div>`;
+        drawer.classList.add('collapsed');
+        memoryDrawerInitialized = false;
+        return;
+    }
+
+    const core = bundle['核心記憶模塊'] || {};
+    content.innerHTML = '';
+
+    const scoreWrap = document.createElement('div');
+    scoreWrap.className = 'memory-score';
+    const scoreValue = document.createElement('div');
+    scoreValue.className = 'memory-score-value';
+    scoreValue.textContent = bundle['評分'] ?? 0;
+    const scoreLabel = document.createElement('div');
+    scoreLabel.className = 'memory-score-label';
+    scoreLabel.textContent = '本輪綜合評分';
+    scoreWrap.appendChild(scoreValue);
+    scoreWrap.appendChild(scoreLabel);
+    content.appendChild(scoreWrap);
+
+    const createSection = (title, bodyText) => {
+        const section = document.createElement('div');
+        section.className = 'memory-section';
+        const titleEl = document.createElement('div');
+        titleEl.className = 'memory-section-title';
+        titleEl.textContent = title;
+        const bodyEl = document.createElement('div');
+        bodyEl.className = 'memory-section-body';
+        if (bodyText !== undefined && bodyText !== null && bodyText !== '') {
+            bodyEl.textContent = bodyText;
+        } else {
+            bodyEl.textContent = '尚無資料';
+        }
+        section.appendChild(titleEl);
+        section.appendChild(bodyEl);
+        return { section, bodyEl };
+    };
+
+    const sections = [
+        createSection('內容評價', bundle['內容評價']),
+        createSection('扣分原因', bundle['扣分原因']),
+        createSection('改進建議', bundle['改進建議']),
+        createSection('專案總結', core['專案總結']),
+        createSection('短期記憶', core['短期記憶']),
+        createSection('長期記憶', core['長期記憶'])
+    ];
+
+    sections.forEach(({ section }) => content.appendChild(section));
+
+    const goalsData = Array.isArray(core['專案目標']) ? core['專案目標'] : [];
+    const { section: goalsSection, bodyEl: goalsBody } = createSection('專案目標', '');
+    const goalsList = document.createElement('div');
+    goalsList.className = 'memory-goals';
+
+    goalsData.forEach((goal) => {
+        const goalItem = document.createElement('div');
+        goalItem.className = 'memory-goal-item';
+
+        const titleRow = document.createElement('div');
+        titleRow.className = 'goal-title';
+
+        const nameEl = document.createElement('span');
+        nameEl.textContent = `步驟 ${goal['步驟'] || ''}: ${goal['任務'] || ''}`;
+
+        const statusEl = document.createElement('span');
+        statusEl.className = 'goal-status';
+        const statusText = goal['狀態'] || '未開始';
+        if (goal['是否為當前任務']) {
+            statusEl.classList.add('active');
+            statusEl.textContent = `${statusText} · 當前`; 
+        } else {
+            statusEl.textContent = statusText;
+        }
+
+        titleRow.appendChild(nameEl);
+        titleRow.appendChild(statusEl);
+        goalItem.appendChild(titleRow);
+
+        const detailEl = document.createElement('div');
+        detailEl.className = 'goal-detail';
+        detailEl.textContent = goal['是否為當前任務'] ? '目前優先處理此任務。' : '保持追蹤此項進度。';
+        goalItem.appendChild(detailEl);
+
+        goalsList.appendChild(goalItem);
+    });
+
+    if (!goalsData.length) {
+        const emptyGoal = document.createElement('div');
+        emptyGoal.className = 'goal-detail';
+        emptyGoal.textContent = '尚未設定具體目標。';
+        goalsList.appendChild(emptyGoal);
+    }
+
+    goalsBody.innerHTML = '';
+    goalsBody.appendChild(goalsList);
+    content.appendChild(goalsSection);
+
+    if (!memoryDrawerInitialized) {
+        drawer.classList.remove('collapsed');
+        memoryDrawerInitialized = true;
+    }
+}
+
+async function refreshMemoryBundle(showError = false) {
+    if (!currentProjectDir) {
+        latestMemoryBundle = null;
+        memoryDrawerInitialized = false;
+        renderMemoryBundle(null);
+        return null;
+    }
+
+    try {
+        const response = await fetch(`/api/memory/${encodeURIComponent(currentProjectDir)}`);
+        const result = await response.json();
+        if (result.success) {
+            latestMemoryBundle = result.memory;
+            renderMemoryBundle(latestMemoryBundle);
+            return latestMemoryBundle;
+        }
+        if (showError) {
+            showNotification(result.error || '無法獲取記憶摘要', 'error');
+        }
+    } catch (error) {
+        console.error('載入記憶摘要失敗:', error);
+        if (showError) {
+            showNotification('載入記憶摘要時發生錯誤', 'error');
+        }
+    }
+    return null;
+}
+
+async function ensureMemoryBundle() {
+    if (!attachMemoryBundle || !currentProjectDir) {
+        return;
+    }
+    if (!latestMemoryBundle) {
+        await refreshMemoryBundle();
+    }
+}
+
+function buildPromptWithMemory(prompt) {
+    if (!attachMemoryBundle || !latestMemoryBundle) {
+        return prompt;
+    }
+
+    const memoryText = formatMemoryAttachment(latestMemoryBundle);
+    return `${prompt}\n\n[自動附加記憶摘要]\n${memoryText}`;
+}
+
+function formatMemoryAttachment(bundle) {
+    if (!bundle) return '';
+    const core = bundle['核心記憶模塊'] || {};
+    const goals = Array.isArray(core['專案目標']) ? core['專案目標'] : [];
+
+    const lines = [
+        `評分：${bundle['評分'] ?? '未評分'}`,
+        `內容評價：${bundle['內容評價'] || '尚無'}`,
+        `扣分原因：${bundle['扣分原因'] || '無'}`,
+        `改進建議：${bundle['改進建議'] || '持續維持現有節奏。'}`,
+        `短期記憶：${core['短期記憶'] || '暫無短期記憶。'}`,
+        `長期記憶：${core['長期記憶'] || '暫無長期記憶。'}`,
+        '專案目標：'
+    ];
+
+    goals.forEach((goal) => {
+        const status = goal['狀態'] || '未開始';
+        const currentFlag = goal['是否為當前任務'] ? '（當前任務）' : '';
+        lines.push(`- 步驟${goal['步驟'] || ''}: ${goal['任務'] || ''}【${status}${currentFlag}】`);
+    });
+
+    if (!goals.length) {
+        lines.push('- 尚未建立專案目標。');
+    }
+
+    return lines.join('\n');
+}
+
 function showAdvancedSettings() {
     togglePlusMenu();
     showSettingsModal();
@@ -315,7 +542,7 @@ function handleKeyDown(event) {
 async function handleSubmit() {
     const input = document.getElementById('mainInput');
     const prompt = input?.value.trim();
-    
+
     if (!prompt) return;
 
     if (!currentProjectDir) {
@@ -326,8 +553,13 @@ async function handleSubmit() {
 
     document.getElementById('emptyState').style.display = 'none';
     document.getElementById('resultsContainer').style.display = 'block';
+    document.getElementById('conversationWrapper').style.display = 'flex';
 
-    addMessage('user', prompt);
+    await ensureMemoryBundle();
+    const finalPrompt = buildPromptWithMemory(prompt);
+    const attachmentsMeta = uploadedFiles.map(file => ({ name: file.name, type: file.type }));
+
+    addMessage('user', finalPrompt, null, null, attachmentsMeta);
 
     input.value = '';
     updateSubmitButton();
@@ -343,7 +575,7 @@ async function handleSubmit() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 folder_path: currentProjectDir,
-                prompt: prompt,
+                prompt: finalPrompt,
                 config: config,
                 files: uploadedFiles,
                 is_iteration: isIterationMode,
@@ -355,8 +587,8 @@ async function handleSubmit() {
         const result = await response.json();
 
         if (result.success) {
-            addMessage('assistant', result.output, result.usage_metadata, result.terminal_output);
-            
+            addMessage('assistant', result.output, result.usage_metadata, result.terminal_output, null);
+
             if (result.project) {
                 currentProject = result.project;
                 if (result.ai_response_json) {
@@ -380,29 +612,36 @@ async function handleSubmit() {
             }
 
             showNotification(result.is_iteration ? '專案迭代成功!' : '專案創建成功!', 'success');
-            
+
             loadProjectsList();
             uploadedFiles = [];
             updateFilesPreview();
             updateAttachedFilesDisplay();
+            await refreshMemoryBundle();
         } else {
-            addMessage('assistant', `✕ 執行失敗：${result.error || result.output}`);
+            addMessage('assistant', `✕ 執行失敗：${result.error || result.output}`, null, null, null);
             showNotification(`執行失敗：${result.error}`, 'error');
+            await refreshMemoryBundle(true);
         }
     } catch (error) {
-        addMessage('assistant', `✕ 連接錯誤：${error}`);
+        addMessage('assistant', `✕ 連接錯誤：${error}`, null, null, null);
         showNotification(`連接錯誤：${error}`, 'error');
+        await refreshMemoryBundle(true);
     } finally {
         hideLoading();
     }
 }
 
-function addMessage(role, content, usageMetadata = null, terminalOutput = null) {
+function addMessage(role, content, usageMetadata = null, terminalOutput = null, files = null) {
     const container = document.getElementById('resultsContainer');
     if (!container) return;
-    
+
     const message = document.createElement('div');
-    message.className = `result-message ${role} selectable`;
+    message.className = 'result-message selectable';
+    message.classList.add(role);
+    if (role === 'user') {
+        message.classList.add('user');
+    }
 
     const header = document.createElement('div');
     header.className = 'message-header';
@@ -424,20 +663,62 @@ function addMessage(role, content, usageMetadata = null, terminalOutput = null) 
 
     message.appendChild(header);
     message.appendChild(messageContent);
-    
-    // ✅ Terminal輸出只顯示在用戶消息中
-    if (role === 'user' && terminalOutput && terminalOutput.trim()) {
+
+    if (Array.isArray(files) && files.length > 0) {
+        const attachmentsLabel = document.createElement('div');
+        attachmentsLabel.className = 'attachment-label';
+        attachmentsLabel.textContent = '附件';
+        message.appendChild(attachmentsLabel);
+
+        const attachmentsWrapper = document.createElement('div');
+        attachmentsWrapper.className = 'message-attachments';
+
+        files.forEach((file) => {
+            const chip = document.createElement('div');
+            chip.className = 'attachment-chip';
+
+            const icon = document.createElement('span');
+            icon.className = 'attachment-icon';
+            icon.textContent = '📎';
+
+            const nameEl = document.createElement('span');
+            nameEl.textContent = file.name || file.filename || '未命名檔案';
+
+            chip.appendChild(icon);
+            chip.appendChild(nameEl);
+
+            if (file.type) {
+                const typeEl = document.createElement('span');
+                typeEl.style.color = 'var(--text-tertiary)';
+                typeEl.textContent = file.type.split('/').pop();
+                chip.appendChild(typeEl);
+            }
+
+            attachmentsWrapper.appendChild(chip);
+        });
+
+        message.appendChild(attachmentsWrapper);
+    }
+
+    if (terminalOutput && terminalOutput.trim()) {
         const terminalSection = document.createElement('div');
         terminalSection.className = 'terminal-output-section';
-        terminalSection.innerHTML = `
-            <div class="terminal-header">
-                <span class="terminal-title">Terminal 輸出</span>
-            </div>
-            <div class="terminal-body selectable">${terminalOutput}</div>
-        `;
+        const terminalHeader = document.createElement('div');
+        terminalHeader.className = 'terminal-header';
+        const terminalTitle = document.createElement('span');
+        terminalTitle.className = 'terminal-title';
+        terminalTitle.textContent = 'Terminal 輸出';
+        terminalHeader.appendChild(terminalTitle);
+
+        const terminalBody = document.createElement('div');
+        terminalBody.className = 'terminal-body selectable';
+        terminalBody.textContent = terminalOutput;
+
+        terminalSection.appendChild(terminalHeader);
+        terminalSection.appendChild(terminalBody);
         message.appendChild(terminalSection);
     }
-    
+
     // Token使用統計只顯示在AI回應中
     if (role === 'assistant' && usageMetadata && typeof usageMetadata === 'object') {
         const tokenUsage = document.createElement('div');
@@ -512,8 +793,13 @@ async function createNewProject() {
             document.getElementById('projectStructureSection').style.display = 'none';
             document.getElementById('emptyState').style.display = 'none';
             document.getElementById('resultsContainer').style.display = 'block';
+            document.getElementById('conversationWrapper').style.display = 'flex';
             document.getElementById('resultsContainer').innerHTML = '';
-            
+            latestMemoryBundle = null;
+            memoryDrawerInitialized = false;
+            renderMemoryBundle(null, '新專案尚未建立記憶摘要，請先提交需求。');
+            updateMemoryMenuState();
+
             showNotification('已選擇專案資料夾', 'success');
             document.getElementById('mainInput')?.focus();
         } else {
@@ -535,13 +821,15 @@ async function selectExistingFolder() {
         if (result.success && result.path) {
             currentProjectDir = result.path;
             isIterationMode = true;
-            
+
             uploadedFiles = [];
             updateFilesPreview();
             updateAttachedFilesDisplay();
-            
+
+            renderMemoryBundle(null, '正在載入記憶摘要...');
+
             const loadResult = await loadExistingProject(result.path);
-            
+
             if (loadResult) {
                 document.getElementById('currentProjectDisplay').style.display = 'block';
                 document.getElementById('currentProjectName').textContent = currentProject.name;
@@ -556,10 +844,11 @@ async function selectExistingFolder() {
                 document.querySelectorAll('.project-item').forEach(item => {
                     item.classList.remove('active');
                 });
-                
+
                 document.getElementById('emptyState').style.display = 'none';
                 document.getElementById('resultsContainer').style.display = 'block';
-                
+                document.getElementById('conversationWrapper').style.display = 'flex';
+
                 showNotification(`已載入專案: ${currentProject.name}`, 'success');
             } else {
                 showNotification('此資料夾不是有效的專案，將作為新專案', 'warning');
@@ -571,11 +860,17 @@ async function selectExistingFolder() {
                     badge.textContent = '新建';
                     badge.style.background = '#10a37f';
                 }
-                
+
                 document.getElementById('homeBtn').style.display = 'flex';
                 document.getElementById('projectStructureSection').style.display = 'none';
+                latestMemoryBundle = null;
+                memoryDrawerInitialized = false;
+                renderMemoryBundle(null, '新專案尚未建立記憶摘要，請先提交需求。');
+                updateMemoryMenuState();
+                document.getElementById('conversationWrapper').style.display = 'flex';
+                document.getElementById('resultsContainer').style.display = 'block';
             }
-            
+
             document.getElementById('mainInput')?.focus();
         } else {
             showNotification(result.error || '未選擇資料夾', 'warning');
@@ -673,13 +968,16 @@ async function selectProject(project) {
     document.getElementById('emptyState').style.display = 'none';
     document.getElementById('resultsContainer').style.display = 'block';
     document.getElementById('resultsContainer').innerHTML = '';
-    
+
     uploadedFiles = [];
     updateFilesPreview();
     updateAttachedFilesDisplay();
-    
+
+    memoryDrawerInitialized = false;
+    renderMemoryBundle(null, '正在載入記憶摘要...');
+
     await loadExistingProject(project.path);
-    
+
     showNotification(`已切換到專案: ${project.name}`, 'success');
 }
 
@@ -693,7 +991,7 @@ async function loadExistingProject(projectDir) {
         });
         
         const result = await response.json();
-        
+
         if (result.success) {
             currentProject = {
                 name: result.project_info.project_name,
@@ -710,18 +1008,30 @@ async function loadExistingProject(projectDir) {
             
             document.getElementById('currentProjectName').textContent = currentProject.name;
             displayProjectStructure(result.project_info.files);
-            
+
             if (result.conversation && result.conversation.messages) {
                 const container = document.getElementById('resultsContainer');
                 if (container) {
                     container.innerHTML = '';
-                    
+
                     for (const msg of result.conversation.messages) {
-                        addMessage(msg.role, msg.content, msg.usage_metadata, msg.terminal_output);
+                        addMessage(msg.role, msg.content, msg.usage_metadata, msg.terminal_output, msg.files);
                     }
                 }
+                document.getElementById('resultsContainer').style.display = 'block';
+                document.getElementById('emptyState').style.display = 'none';
+                document.getElementById('conversationWrapper').style.display = 'flex';
             }
-            
+
+            if (result.memory) {
+                latestMemoryBundle = result.memory;
+                renderMemoryBundle(result.memory);
+            } else {
+                latestMemoryBundle = null;
+                memoryDrawerInitialized = false;
+                renderMemoryBundle(null, '專案尚未產生記憶摘要，請先進行一次對話。');
+            }
+
             return true;
         } else {
             return false;
@@ -831,14 +1141,19 @@ function resetToHome() {
     document.getElementById('resultsContainer').innerHTML = '';
     document.getElementById('projectStructureSection').style.display = 'none';
     document.getElementById('homeBtn').style.display = 'none';
+    document.getElementById('conversationWrapper').style.display = 'none';
     
     document.querySelectorAll('.project-item').forEach(item => {
         item.classList.remove('active');
     });
-    
+
     updateFilesPreview();
     updateAttachedFilesDisplay();
-    
+    latestMemoryBundle = null;
+    memoryDrawerInitialized = false;
+    renderMemoryBundle(null);
+    updateMemoryMenuState();
+
     showNotification('已回到初始介面', 'info');
 }
 

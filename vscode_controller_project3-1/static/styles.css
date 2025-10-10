@@ -371,7 +371,7 @@ body {
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    align-items: center;
+    align-items: stretch;
     padding: 24px;
 }
 
@@ -813,10 +813,20 @@ body {
 /* =================================== */
 /* 結果容器 */
 /* =================================== */
-.results-container {
-    max-width: 900px;
+.conversation-wrapper {
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
     width: 100%;
+    max-width: 1200px;
     margin: 0 auto;
+}
+
+.results-container {
+    flex: 1;
+    max-width: 100%;
+    width: 100%;
+    margin: 0;
     padding: 20px;
 }
 
@@ -891,6 +901,39 @@ body {
     color: var(--text-primary);
 }
 
+.message-attachments {
+    margin-top: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.attachment-label {
+    margin-top: 12px;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.attachment-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-light);
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.attachment-icon {
+    width: 16px;
+    height: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
 /* =================================== */
 /* Terminal 輸出區塊 */
 /* =================================== */
@@ -925,6 +968,149 @@ body {
     line-height: 1.4;
     white-space: pre-wrap;
     word-wrap: break-word;
+}
+
+/* =================================== */
+/* 記憶抽屜 */
+/* =================================== */
+.memory-drawer {
+    width: 320px;
+    min-width: 280px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-light);
+    border-radius: 16px;
+    box-shadow: var(--shadow-md);
+    display: flex;
+    flex-direction: column;
+    max-height: calc(100vh - 160px);
+    position: sticky;
+    top: 24px;
+    transition: width 0.25s ease;
+}
+
+.memory-drawer.collapsed {
+    width: 52px;
+    min-width: 52px;
+    overflow: hidden;
+}
+
+.memory-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 14px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-primary);
+    font-weight: 500;
+    border-bottom: 1px solid var(--border-light);
+}
+
+.memory-drawer.collapsed .memory-toggle span {
+    display: none;
+}
+
+.memory-drawer.collapsed .memory-content {
+    display: none;
+}
+
+.memory-content {
+    padding: 14px 16px;
+    overflow-y: auto;
+}
+
+.memory-empty {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+}
+
+.memory-score {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.memory-score-value {
+    font-size: 32px;
+    font-weight: 700;
+    color: var(--primary-color);
+}
+
+.memory-score-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.memory-section {
+    margin-bottom: 16px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border-light);
+}
+
+.memory-section:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+.memory-section-title {
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: var(--text-primary);
+}
+
+.memory-section-body {
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+}
+
+.memory-goals {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.memory-goal-item {
+    padding: 8px 10px;
+    border-radius: 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-light);
+    font-size: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.goal-title {
+    font-weight: 600;
+    color: var(--text-primary);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.goal-status {
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+}
+
+.goal-status.active {
+    background: rgba(16, 163, 127, 0.1);
+    color: var(--primary-color);
+}
+
+.goal-detail {
+    font-size: 11px;
+    color: var(--text-secondary);
 }
 
 /* =================================== */

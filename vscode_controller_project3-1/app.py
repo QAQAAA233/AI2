@@ -195,6 +195,150 @@ class ProjectConversation:
     created_at: str = ""
     updated_at: str = ""
 
+
+class MemoryManager:
+    """長短期記憶與評分管理模塊"""
+
+    ERROR_KEYWORDS = ["失敗", "錯誤", "無法", "exception", "traceback"]
+
+    @staticmethod
+    def _limit_text(text: str, max_length: int = 200) -> str:
+        if len(text) <= max_length:
+            return text
+        return text[: max_length - 1] + "…"
+
+    @staticmethod
+    def _recent_user_messages(conversation: ProjectConversation, limit: int = 3) -> List[str]:
+        recent = [msg.content.strip() for msg in conversation.messages if msg.role == 'user' and msg.content.strip()]
+        return recent[-limit:]
+
+    @staticmethod
+    def _has_positive_confirmation(message: Optional[ConversationMessage]) -> bool:
+        if not message:
+            return False
+        content = message.content
+        return any(keyword in content for keyword in ["成功", "完成", "已更新", "已生成"])
+
+    @staticmethod
+    def _build_goals(conversation: ProjectConversation, project_info: Optional[Dict]) -> List[Dict[str, Any]]:
+        user_messages = [m for m in conversation.messages if m.role == 'user']
+        assistant_messages = [m for m in conversation.messages if m.role == 'assistant']
+        last_assistant = assistant_messages[-1] if assistant_messages else None
+        has_terminal = any((m.terminal_output or '').strip() for m in conversation.messages)
+
+        goals = [
+            {"步驟": 1, "任務": "梳理並確認使用者需求與上下文", "狀態": "未開始", "是否為當前任務": False},
+            {"步驟": 2, "任務": "生成或更新專案程式碼與結構", "狀態": "未開始", "是否為當前任務": False},
+            {"步驟": 3, "任務": "執行測試並檢視終端/截圖結果", "狀態": "未開始", "是否為當前任務": False},
+            {"步驟": 4, "任務": "整理評分、記憶並規劃下一步優化", "狀態": "未開始", "是否為當前任務": False},
+        ]
+
+        if user_messages:
+            goals[0]["狀態"] = "已完成"
+        else:
+            goals[0]["狀態"] = "進行中"
+
+        if assistant_messages:
+            goals[1]["狀態"] = "已完成" if MemoryManager._has_positive_confirmation(last_assistant) else "進行中"
+        else:
+            goals[1]["狀態"] = "未開始"
+
+        if has_terminal:
+            goals[2]["狀態"] = "進行中"
+        else:
+            goals[2]["狀態"] = "未開始"
+
+        goals[3]["狀態"] = "進行中" if assistant_messages else "未開始"
+
+        current_goal_index = next((idx for idx, goal in enumerate(goals) if goal["狀態"] != "已完成"), len(goals) - 1)
+        goals[current_goal_index]["是否為當前任務"] = True
+        return goals
+
+    @staticmethod
+    def build_memory_bundle(conversation: ProjectConversation, project_info: Optional[Dict] = None) -> Dict[str, Any]:
+        messages = conversation.messages
+        assistant_messages = [m for m in messages if m.role == 'assistant']
+        last_assistant = assistant_messages[-1] if assistant_messages else None
+        user_messages = [m for m in messages if m.role == 'user']
+
+        score = 100
+        deductions: List[str] = []
+
+        if not messages:
+            score = 60
+            deductions.append("尚未開始實際對話流程")
+        else:
+            if not assistant_messages:
+                score -= 15
+                deductions.append("尚未獲得 AI 端回覆")
+            if last_assistant and any(keyword in last_assistant.content for keyword in MemoryManager.ERROR_KEYWORDS):
+                score -= 20
+                deductions.append("最近一次 AI 回覆包含錯誤提示，需檢查流程")
+            if len(user_messages) > 0 and len(user_messages[-1].content.strip()) < 10:
+                score -= 5
+                deductions.append("最近一次使用者需求過於簡短，可能導致理解不足")
+
+        score = max(0, min(100, score))
+
+        total_turns = len(messages)
+        evaluation_parts = []
+        evaluation_parts.append(f"累計 {total_turns} 則訊息")
+        if assistant_messages:
+            evaluation_parts.append("已取得 AI 端回應")
+        if any((m.terminal_output or '').strip() for m in messages):
+            evaluation_parts.append("包含終端輸出記錄")
+        if project_info and project_info.get('description'):
+            evaluation_parts.append("專案描述已建立")
+        evaluation_text = "、".join(evaluation_parts) + "，整體流程穩定。"
+        evaluation_text = MemoryManager._limit_text(evaluation_text, 200)
+
+        if deductions:
+            improvement = "；".join(["針對下次迭代建議："] + [f"• {reason}" for reason in deductions])
+        else:
+            improvement = "保持目前節奏，持續更新程式碼並同步測試結果。"
+        improvement = MemoryManager._limit_text(improvement.replace("；", "\n"), 200)
+
+        project_summary = ""
+        if project_info and project_info.get('description'):
+            project_summary = project_info['description']
+        elif assistant_messages:
+            project_summary = MemoryManager._limit_text(assistant_messages[0].content.strip(), 160)
+        else:
+            project_summary = "尚未產出專案概要，可在下一輪請求時補充需求描述。"
+
+        recent_requests = MemoryManager._recent_user_messages(conversation)
+        if recent_requests:
+            stm_lines = [f"{idx + 1}. {content}" for idx, content in enumerate(recent_requests)]
+            short_term_memory = "\n".join(stm_lines)
+        else:
+            short_term_memory = "最近尚無新的使用者輸入。"
+
+        if project_info:
+            main_file = project_info.get('main_file') or "尚未指定主程式"
+            long_term_memory = f"專案名稱：{project_info.get('project_name', Path(conversation.project_dir).name)}；核心檔案：{main_file}。"
+        else:
+            long_term_memory = f"專案目錄：{Path(conversation.project_dir).name}，尚未生成詳細資訊。"
+
+        goals = MemoryManager._build_goals(conversation, project_info)
+
+        deduction_text = "、".join(deductions) if deductions else "無"
+
+        bundle = {
+            "評分": score,
+            "內容評價": evaluation_text,
+            "扣分原因": deduction_text or "無",
+            "改進建議": improvement,
+            "核心記憶模塊": {
+                "專案總結": MemoryManager._limit_text(project_summary, 200),
+                "短期記憶": MemoryManager._limit_text(short_term_memory, 200),
+                "長期記憶": MemoryManager._limit_text(long_term_memory, 200),
+                "專案目標": goals,
+            },
+        }
+
+        return bundle
+
+
 @dataclass
 class ProcessResult:
     """處理結果數據模型"""
@@ -2180,6 +2324,8 @@ def load_project():
             }
             messages_data.append(msg_dict)
         
+        memory_bundle = MemoryManager.build_memory_bundle(conversation, project_info)
+
         return jsonify({
             'success': True,
             'project_info': project_info,
@@ -2190,7 +2336,8 @@ def load_project():
                 'messages': messages_data,
                 'created_at': conversation.created_at,
                 'updated_at': conversation.updated_at
-            }
+            },
+            'memory': memory_bundle
         })
         
     except Exception as e:
@@ -2223,6 +2370,9 @@ def get_conversation(project_dir):
             }
             messages_data.append(msg_dict)
         
+        project_info = ProjectManager.load_project_info(project_dir)
+        memory_bundle = MemoryManager.build_memory_bundle(conversation, project_info)
+
         return jsonify({
             'success': True,
             'conversation': {
@@ -2230,7 +2380,8 @@ def get_conversation(project_dir):
                 'messages': messages_data,
                 'created_at': conversation.created_at,
                 'updated_at': conversation.updated_at
-            }
+            },
+            'memory': memory_bundle
         })
     except Exception as e:
         logger.error(f"獲取對話歷史失敗: {e}")
@@ -2238,6 +2389,19 @@ def get_conversation(project_dir):
             'success': False,
             'error': str(e)
         }), 500
+
+
+@app.route('/api/memory/<path:project_dir>', methods=['GET'])
+def get_memory_bundle(project_dir):
+    """取得指定專案的長短期記憶與評分摘要"""
+    try:
+        conversation = ConversationManager.load_conversation(project_dir)
+        project_info = ProjectManager.load_project_info(project_dir)
+        memory_bundle = MemoryManager.build_memory_bundle(conversation, project_info)
+        return jsonify({'success': True, 'memory': memory_bundle})
+    except Exception as e:
+        logger.error(f"生成記憶摘要失敗: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/projects', methods=['GET'])
 def get_projects():

@@ -179,7 +179,21 @@
                 </div>
             </div>
 
-            <div class="results-container" id="resultsContainer" style="display: none;"></div>
+            <div class="conversation-wrapper" id="conversationWrapper" style="display: none;">
+                <div class="results-container" id="resultsContainer" style="display: none;"></div>
+                <div class="memory-drawer collapsed" id="memoryDrawer">
+                    <button class="memory-toggle" onclick="toggleMemoryDrawer()">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M4 12h16" />
+                            <path d="M10 6l-6 6 6 6" />
+                        </svg>
+                        <span>長短期記憶 / 評分面板</span>
+                    </button>
+                    <div class="memory-content" id="memoryContent">
+                        <div class="memory-empty">尚未載入記憶摘要，請選擇專案或發送請求。</div>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <div class="input-area">
@@ -216,6 +230,12 @@
                                     <line x1="12" y1="19" x2="20" y2="19"/>
                                 </svg>
                                 <span>附加 Terminal 輸出</span>
+                            </div>
+                            <div class="menu-item" id="memoryMenuItem" onclick="toggleMemoryAttachment()">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 20c4.418 0 8-3.134 8-7s-3.582-7-8-7-8 3.134-8 7c0 2.485 1.51 4.673 3.781 5.943L8 21l3.087-2.058A8.705 8.705 0 0012 20z" />
+                                </svg>
+                                <span>自動附加記憶摘要</span>
                             </div>
                             <div class="menu-divider"></div>
                             <div class="menu-item" onclick="showAdvancedSettings()">
