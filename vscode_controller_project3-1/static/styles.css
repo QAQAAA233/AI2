@@ -218,12 +218,31 @@ body {
     background: transparent;
 }
 
+.project-item.placeholder {
+    background: rgba(16, 163, 127, 0.08);
+}
+
 .project-item:hover {
     background: var(--bg-primary);
 }
 
 .project-item.active {
     background: var(--bg-primary);
+}
+
+.project-item-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.project-status-badge {
+    font-size: 11px;
+    font-weight: 600;
+    color: #92400e;
+    background: #fef3c7;
+    border-radius: 999px;
+    padding: 1px 8px;
 }
 
 .project-item-name {
@@ -556,6 +575,12 @@ body {
     border: 1px solid var(--border-light);
 }
 
+.attached-file-item.auto {
+    border-style: dashed;
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+}
+
 .file-type-badge {
     font-size: 9px;
     padding: 3px 6px;
@@ -573,6 +598,21 @@ body {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.auto-attachment-type {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+}
+
+.auto-attachment-badge {
+    font-size: 11px;
+    font-weight: 600;
+    color: #1d4ed8;
+    background: #dbeafe;
+    border-radius: 999px;
+    padding: 1px 8px;
 }
 
 .file-desc-text {
