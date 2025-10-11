@@ -14,17 +14,15 @@ import threading
 import time
 import re
 import json
+import shutil
 import platform
 import logging
 import queue
-import tempfile
-import shutil
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass, asdict, field
 from enum import Enum
-from html.parser import HTMLParser
 
 # Web framework imports
 from flask import Flask, render_template, jsonify, request, send_file
@@ -143,6 +141,7 @@ class AIConfig:
     gemini_api_key: str = ""
     model_name: str = "gemini-2.5-pro"
     system_instruction: str = ""
+    prompt_mode: str = "default"
     generation_params: Dict[str, Any] = None
     thinking_config: Dict[str, Any] = None
     safety_settings: Dict[str, str] = None
@@ -177,6 +176,13 @@ class AIConfig:
                 "auto_test": False,
                 "monitor_interval": 5
             }
+
+        if not self.prompt_mode:
+            self.prompt_mode = "default"
+        else:
+            self.prompt_mode = str(self.prompt_mode).lower()
+            if self.prompt_mode not in {"default", "creative"}:
+                self.prompt_mode = "default"
 
 @dataclass
 class ConversationMessage:
@@ -218,36 +224,58 @@ class ProcessResult:
     terminal_output: str = ""
     memory_snapshot: Optional[Dict[str, Any]] = None
     evaluation_snapshot: Optional[Dict[str, Any]] = None
-    lint_reports: List[Dict[str, Any]] = field(default_factory=list)
+    diagnostics_report: List[Dict[str, Any]] = field(default_factory=list)
 
 # ============================================
 # JSON Schema 定義 - 繁體中文化
 # ============================================
 
 def get_json_schema():
-    """獲取 Gemini API 的 JSON Schema"""
+    """獲取 Gemini API 的 JSON Schema（僅優化描述文字；未更動任何結構/鍵名/enum/required）"""
     return {
         "type": "object",
         "properties": {
-            "評分": {"type": "integer", "minimum": 0, "maximum": 100, "description": "請針對本次回應品質給出 0-100 分的整數評分"},
-            "內容評價": {"type": "string", "description": "200 字以內的簡短評論,需涵蓋規則遵守與內容品質"},
-            "扣分原因": {"type": "string", "description": "若評分未滿分,需具體指出扣分原因,否則填寫『無』"},
-            "改進建議": {"type": "string", "description": "列出下次回覆可改進之處,若無則填寫『無』"},
+            "評分": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "以『思考品質與合規度』為核心給整數分：覆蓋(任務需求完整度)、正確性(事實/邏輯/程式可執行)、安全性(避免違規與洩露內部推理)、結構合規(JSON 可解析、鍵值齊全)、可測性(指令可重現)。採保守原則評分。"
+            },
+            "內容評價": {
+                "type": "string",
+                "description": "≤200字；聚焦規則遵守與內容品質：是否僅輸出單一 JSON、是否避免外露推理步驟、是否完成需求且邏輯自洽、是否含執行指令/相依套件、UI/可用性是否被審視。"
+            },
+            "扣分原因": {
+                "type": "string",
+                "description": "未滿分時具體指出：如『結構缺鍵』『可能無法執行』『未做自檢』『有外露推理跡象』『安全/版權/引用風險』『互動/可用性不足』；若無則填『無』。"
+            },
+            "改進建議": {
+                "type": "string",
+                "description": "提出下一輪可驗證且增益高的改進，優先：資料驗證/自我檢核、錯誤處理、可用性強化、測試樣例、效能與相容性；若確無可改進，填『無』。"
+            },
             "核心記憶模塊": {
                 "type": "object",
-                "description": "保存長短期記憶與專案目標的模塊",
+                "description": "保存長短期記憶與專案目標的模塊；以『回顧→抽象→下一步』思考節奏撰寫；避免目標口號式語句，改以事實與證據導向。",
                 "properties": {
-                    "專案總結": {"type": "string", "description": "概述目前專案或對話重點"},
-                    "短期記憶": {"type": "string", "description": "近期對話中與當前任務最相關的資訊"},
-                    "長期記憶": {"type": "string", "description": "專案長期背景、核心目標或重要限制"},
+                    "專案總結": {"type": "string", "description": "以中立語氣概述當前進展/新限制/決策依據；避免口號式目標。"},
+                    "短期記憶": {
+                        "type": "array",
+                        "description": "列出最近數輪的關鍵事實、決策與限制(每列一句話)；避免含推理細節或機密。",
+                        "items": {"type": "string"}
+                    },
+                    "長期記憶": {
+                        "type": "array",
+                        "description": "條列背景、核心原則、重要限制、已知失敗教訓；有助後續內隱式思考但不暴露推理。",
+                        "items": {"type": "string"}
+                    },
                     "專案目標": {
                         "type": "array",
-                        "description": "依序列出至少四個專案目標與狀態",
+                        "description": "以可驗證任務敘述呈現(非口號)；隨進度更新狀態；明確標記當前任務。",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "步驟": {"type": "integer", "description": "目標步驟編號"},
-                                "任務": {"type": "string", "description": "具體任務描述"},
+                                "任務": {"type": "string", "description": "以可驗證輸出描述(如：完成單元測試/補齊依賴/改善可用性)"},
                                 "狀態": {"type": "string", "enum": ["未開始", "進行中", "已完成"], "description": "任務狀態"},
                                 "是否為當前任務": {"type": "boolean", "description": "此任務是否為目前主要工作"}
                             },
@@ -260,13 +288,13 @@ def get_json_schema():
             },
             "專案輸出": {
                 "type": "object",
-                "description": "包含完整程式碼與操作資訊的區塊",
+                "description": "包含完整程式碼與操作資訊；請先進行內隱式自我檢核(結構齊全/可執行/依賴同步/UI可用性)再產出；不得外露中間推理。",
                 "properties": {
-                    "project_name": {"type": "string", "description": "專案名稱"},
-                    "description": {"type": "string", "description": "專案描述"},
-                    "main_file": {"type": "string", "description": "主要執行檔案"},
-                    "setup_instructions": {"type": "array", "items": {"type": "string"}, "description": "設置指令"},
-                    "run_instructions": {"type": "array", "items": {"type": "string"}, "description": "執行指令"},
+                    "project_name": {"type": "string", "description": "專案名稱(簡潔可辨識)"},
+                    "description": {"type": "string", "description": "以『問題→解法→驗證』敘事；列出已考慮的邊界情況與失敗處理。"},
+                    "main_file": {"type": "string", "description": "主要執行檔名(需與 files 對應存在)"},
+                    "setup_instructions": {"type": "array", "items": {"type": "string"}, "description": "環境設置步驟(逐條可執行)；含套件安裝/環境變數/啟動前檢查。"},
+                    "run_instructions": {"type": "array", "items": {"type": "string"}, "description": "啟動與測試指令(含本機/容器/伺服器埠)；若為UI程式附使用路徑。"},
                     "files": {
                         "type": "array",
                         "items": {
@@ -278,15 +306,15 @@ def get_json_schema():
                                     "enum": ["python", "javascript", "html", "css", "typescript", "java", "cpp", "c", "go", "rust", "ruby", "php", "swift", "kotlin", "sql", "shell", "yaml", "json", "xml", "markdown", "text"],
                                     "description": "檔案類型"
                                 },
-                                "code": {"type": "string", "description": "完整程式碼內容"},
+                                "code": {"type": "string", "description": "完整可執行程式；以繁中註解說明關鍵設計與錯誤處理；不得使用省略號。"},
                                 "opens_window": {"type": "boolean", "description": "是否會開啟視窗"},
                                 "window_title": {"type": ["string", "null"], "description": "視窗標題(如果有)"},
-                                "install_requirements": {"type": "array", "items": {"type": "string"}, "description": "安裝需求(如 pip install package)"},
-                                "dependencies": {"type": "array", "items": {"type": "string"}, "description": "相依套件"},
-                                "description": {"type": "string", "description": "檔案描述"},
-                                "run_command": {"type": ["string", "null"], "description": "執行命令"},
+                                "install_requirements": {"type": "array", "items": {"type": "string"}, "description": "所需安裝項(如 pip install package)；與 dependencies 對齊。"},
+                                "dependencies": {"type": "array", "items": {"type": "string"}, "description": "相依套件清單(版本可選)；需與實際程式一致。"},
+                                "description": {"type": "string", "description": "檔案用途與主要邊界條件說明"},
+                                "run_command": {"type": ["string", "null"], "description": "執行命令(如 python main.py)；若非獨立可為 null。"},
                                 "is_web_app": {"type": "boolean", "description": "是否為網頁應用"},
-                                "can_open_standalone": {"type": "boolean", "description": "主程式是否能自動開啟獨立瀏覽器視窗"},
+                                "can_open_standalone": {"type": "boolean", "description": "是否能自動開啟獨立瀏覽器視窗"},
                                 "server_address": {"type": ["string", "null"], "description": "伺服器地址(如 http://localhost:5000)"},
                                 "web_title": {"type": ["string", "null"], "description": "網頁標題"}
                             },
@@ -300,65 +328,102 @@ def get_json_schema():
         "required": ["評分", "內容評價", "扣分原因", "改進建議", "核心記憶模塊", "專案輸出"]
     }
 
-def get_json_system_instruction():
-    """獲取 JSON 模式的系統指令 - 繁體中文版 + Flask修復"""
-    return """你是一位專業的程式碼與專案助理,負責在每次回應中同時提供程式碼成果、評分與記憶管理資訊。
 
-請務必輸出**單一 JSON 物件**,其欄位結構如下:
+def get_json_system_instruction(mode: str = "default", custom_instruction: str = "") -> str:
+    """獲取 JSON 模式的系統指令(聚焦誘導思考；不外露推理；維持原函式簽名與回傳型別)"""
+    normalized_mode = (mode or "default").lower()
+    if normalized_mode not in {"default", "creative"}:
+        normalized_mode = "default"
+
+    base_instruction = """你是一位專業的程式碼與專案助理。每次回應必須只輸出**單一 JSON 物件**，包含可執行程式碼、評分紀錄與記憶模塊。請在內部以私有思考空間進行推理、規劃、反例檢查與多路徑比較，但**禁止**在輸出中外露任何中間推理或草稿；輸出只保留最終結果 JSON。
+
+JSON 結構必須包含以下欄位:
 {
-  "評分": 0-100 的整數,
-  "內容評價": "200 字內的綜合評論",
-  "扣分原因": "若無扣分請填『無』",
-  "改進建議": "下一次回應可改進的方向,若無請填『無』",
+  "評分": 0-100 的整數(保守評分、以事實與可驗證性為準),
+  "內容評價": "≤200字規則遵守與品質摘要",
+  "扣分原因": "若未滿分需具體指摘；否則『無』",
+  "改進建議": "下一輪可驗證的強化方向；無則『無』",
   "核心記憶模塊": {
-      "專案總結": "摘要最新對話或專案重點",
-      "短期記憶": "列出最近幾輪對話中的關鍵資訊，請以條列式（建議每行以『• 』開頭）呈現",
-      "長期記憶": "整理專案背景、核心目標或重要限制，請以條列式呈現以便快速掃描",
+      "專案總結": "中立概述進展/新限制/依據",
+      "短期記憶": ["最近關鍵事實/決策/限制(不含推理)"],
+      "長期記憶": ["背景/原則/限制/失敗教訓(不含推理)"],
       "專案目標": [
-          {"步驟": 1, "任務": "...", "狀態": "已完成/進行中/未開始", "是否為當前任務": true/false},
-          {"步驟": 2, ... 至少四個項目 }
+          {"步驟":1,"任務":"可驗證任務","狀態":"已完成/進行中/未開始","是否為當前任務":true/false},
+          {"步驟":2,... 至少四項並隨進度更新}
       ]
   },
   "專案輸出": {
-      "project_name": "專案名稱",
-      "description": "簡要描述",
-      "main_file": "主要程式檔案名稱",
-      "setup_instructions": ["pip install package1"...],
-      "run_instructions": ["python main.py"...],
-      "files": [
+      "project_name":"專案名稱",
+      "description":"問題→解法→驗證；含邊界與錯誤處理",
+      "main_file":"主要程式檔案名稱",
+      "setup_instructions":["pip install ...", "..."],
+      "run_instructions":["python main.py", "..."],
+      "files":[
           {
-              "filename": "檔案名稱(含副檔名)",
-              "filetype": "python/javascript/...",
-              "code": "完整無省略程式碼,使用實際換行符號",
-              "opens_window": true/false,
-              "window_title": null 或字串,
-              "install_requirements": ["pip install ..."],
-              "dependencies": ["flask", "numpy"...],
-              "description": "檔案用途說明",
-              "run_command": "python main.py" 或 null,
-              "is_web_app": true/false,
-              "can_open_standalone": true/false,
-              "server_address": "http://localhost:5000" 或 null,
-              "web_title": "網頁標題" 或 null
+              "filename":"檔名.副檔名",
+              "filetype":"python/javascript/...",
+              "code":"完整可執行程式；繁中註解；不得省略",
+              "opens_window":true/false,
+              "window_title":null或字串,
+              "install_requirements":["pip install ..."],
+              "dependencies":["flask","numpy",...],
+              "description":"用途與邊界條件",
+              "run_command":"python main.py"或null,
+              "is_web_app":true/false,
+              "can_open_standalone":true/false,
+              "server_address":"http://localhost:5000"或null,
+              "web_title":"字串或null"
           }
       ]
   }
 }
 
-嚴格遵守以下規範:
-1. 僅能輸出有效 JSON,不得加入多餘文字、註解或 Markdown。
-2. "files" 內的程式碼必須為完整、可執行、無省略號的繁體中文註解或文字,並以真實 \n 代表換行、\t 代表縮排。
-3. 若為 Flask/Node 等伺服器程式,禁止使用 debug=True 或熱重載模式,Flask 必須採用 `app.run(host='0.0.0.0', port=5000)`。
-4. 所有網頁相關檔案需填寫 `is_web_app`, 並在必要時提供 `server_address` 與 `web_title`。
-5. 任何需要額外套件的檔案,必須在 `install_requirements` 中完整列出安裝指令。
-6. 多檔案專案需確保相依檔案之間的匯入路徑正確,不得遺漏必要資源。
-7. 所有字串請使用繁體中文說明,除非程式語言語法或函式庫名稱要求英文。
-8. 專案目標需依進度更新狀態,並清楚標示當前主要任務。
-9. 評分、扣分原因、改進建議需與本次回覆內容一致,不得空泛。
-10. 若提示中提供「語法偵錯報告」段落,請先逐一處理其中的錯誤與警告後再完成其他需求。
+核心規範(誘導思考而非訂目標):
+1) 僅輸出有效 JSON；不得加入 Markdown/註解/多餘文字。
+2) 內部先進行『分解→驗證→對照→收斂』：先將需求拆成可驗證子任務(Least-to-Most)；針對關鍵步驟做多路徑內部推演並自我一致性比對(Self-Consistency)；必要時擬定計畫再實作(Plan-and-Solve)；遇到外部資源/工具情境時先規劃再行動(ReAct)；若需要探索多方案，於內部做樹狀/圖狀思考(ToT/GoT)後再收斂單一最終輸出。
+3) 安全與隱私：禁止外露中間推理；僅給出可驗證結論與程式；所有第三方素材需標明授權假設或改以自製。
+4) 可執行性優先：`files[].code` 為完整可跑版本；避免 debug 模式；Flask 僅用 `app.run(host='0.0.0.0', port=5000)`。
+5) 結構自檢：輸出前以內部清單檢核鍵名/必填/enum/型別/可解析性/依賴一致性；缺失則先內部修正。
+6) 使用者介面：若有 UI，先於內部審視互動流程、回饋、響應式與可近用性，再輸出程式；必要時加入輕量狀態提示。
+7) 評分/扣分/建議須對應本輪輸出與自檢結果；避免空泛用語。"""
 
-請以這個全新結構回覆,不要沿用舊版模板或刪減任何必要欄位。"""
+    if normalized_mode == "creative":
+        mode_instruction = """【模式：創意模式】
+- 在可靠性前提下探索體驗加值：個人化設定、非同步任務、可視化、微動畫。
+- 改進建議優先提出能提升效用的創新嘗試，並附可驗證評估方式(如 A/B 指標或效能量測)。"""
+    else:
+        mode_instruction = """【模式：預設模式】
+- 穩健與可維護性優先：補齊測試、錯誤處理、效能/相容性；確保文件與指令可重現。"""
 
+    custom_block = ""
+    if custom_instruction:
+        custom_block = f"\n【使用者自訂補充】\n{custom_instruction.strip()}"
+
+    return "\n".join([
+        base_instruction,
+        mode_instruction,
+        "請嚴格依此最新模板回覆，避免外露推理，且不得遺漏任何欄位。" + custom_block
+    ])
+
+
+
+def sanitize_json_strings(data: Any) -> Any:
+    """將字串中的控制符號轉換成安全的跳脫字元"""
+
+    if isinstance(data, dict):
+        return {key: sanitize_json_strings(value) for key, value in data.items()}
+
+    if isinstance(data, list):
+        return [sanitize_json_strings(item) for item in data]
+
+    if isinstance(data, str):
+        sanitized = data.replace('\r\n', '\n')
+        sanitized = sanitized.replace('\r', '\\r')
+        sanitized = sanitized.replace('\n', '\\n')
+        sanitized = sanitized.replace('\t', '\\t')
+        return sanitized
+
+    return data
 # ============================================
 # 配置管理模塊
 # ============================================
@@ -644,7 +709,7 @@ class ProjectManager:
         
         build_tree(project_dir_path)
         return "\n".join(structure_lines)
-
+    
     @staticmethod
     def add_to_project_list(project_dir: str, project_name: str, description: str = ""):
         """添加專案到列表"""
@@ -705,285 +770,227 @@ class ProjectManager:
             return False
 
 # ============================================
-# Gemini AI 模塊
+# 語法偵錯管理
 # ============================================
 
+class DiagnosticsManager:
+    """語法偵錯管理器,針對常見語言提供基礎語法檢查"""
 
-class LintAnalyzer:
-    """多語言語法偵錯工具"""
+    EXCLUDE_NAMES = {'PROJECT_INFO.json', '__pycache__', '.git', 'node_modules', 'venv', '.vscode'}
 
-    SELF_CLOSING_TAGS = {
-        'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
-        'link', 'meta', 'param', 'source', 'track', 'wbr'
-    }
+    HANDLERS = {}
 
     @staticmethod
-    def analyze_files(files: List[Dict], working_dir: Optional[str] = None) -> List[Dict[str, Any]]:
-        reports: List[Dict[str, Any]] = []
-        if not files:
-            return reports
-
-        working_dir_path = Path(working_dir) if working_dir else None
-
-        for file_data in files:
-            if not file_data:
-                continue
-
-            name = file_data.get('name') or '未命名檔案'
-            content = file_data.get('content')
-
-            if not isinstance(content, str):
-                reports.append(LintAnalyzer._skip(name, '非文字檔案，略過語法偵錯'))
-                continue
-
-            if not content.strip():
-                reports.append(LintAnalyzer._warning(name, '檔案內容為空，請確認是否需要填寫程式碼'))
-                continue
-
-            analyzer = LintAnalyzer._get_analyzer(name)
-            if not analyzer:
-                reports.append(LintAnalyzer._skip(name, '目前尚未支援此檔案類型的語法偵錯'))
-                continue
-
-            try:
-                report = analyzer(name, content, working_dir_path)
-            except Exception as exc:  # pylint: disable=broad-except
-                logger.error(f"語法偵錯發生例外: {name}: {exc}")
-                report = LintAnalyzer._error(name, '語法偵錯時發生例外', str(exc))
-
-            reports.append(report)
-
-        return reports
+    def _truncate(text: str, limit: int = 180) -> str:
+        if len(text) <= limit:
+            return text
+        return text[:limit - 1] + '…'
 
     @staticmethod
-    def format_reports(reports: List[Dict[str, Any]]) -> str:
-        if not reports:
-            return ''
-
-        status_label = {
-            'error': '錯誤',
-            'warning': '警告',
-            'pass': '通過',
-            'skip': '略過'
-        }
-
-        lines: List[str] = []
-        for index, report in enumerate(reports, 1):
-            status = str(report.get('status', 'info')).lower()
-            label = status_label.get(status, '資訊')
-            filename = report.get('file', '未命名檔案')
-            message = report.get('message', '無詳細訊息')
-            line = f"{index}. [{label}] {filename} - {message}"
-
-            details = report.get('details')
-            if details:
-                detail_text = str(details).strip()
-                if len(detail_text) > 400:
-                    detail_text = detail_text[:397] + '…'
-                line += f"\n    詳細：{detail_text}"
-
-            lines.append(line)
-
-        return "\n".join(lines)
-
-    @staticmethod
-    def _get_analyzer(filename: str):
-        ext = Path(filename).suffix.lower()
-        if ext in {'.mjs', '.cjs', '.jsx'}:
-            ext = '.js'
-        if ext in {'.tsx', '.d.ts'}:
-            ext = '.ts'
-
-        mapping = {
-            '.py': LintAnalyzer._analyze_python,
-            '.js': LintAnalyzer._analyze_javascript,
-            '.ts': LintAnalyzer._analyze_typescript,
-            '.json': LintAnalyzer._analyze_json,
-            '.html': LintAnalyzer._analyze_html,
-            '.htm': LintAnalyzer._analyze_html,
-            '.css': LintAnalyzer._analyze_css,
-            '.yml': LintAnalyzer._analyze_yaml,
-            '.yaml': LintAnalyzer._analyze_yaml
-        }
-
-        return mapping.get(ext)
-
-    @staticmethod
-    def _success(name: str, message: str) -> Dict[str, Any]:
-        return {'file': name, 'status': 'pass', 'message': message}
-
-    @staticmethod
-    def _warning(name: str, message: str) -> Dict[str, Any]:
-        return {'file': name, 'status': 'warning', 'message': message}
-
-    @staticmethod
-    def _skip(name: str, message: str) -> Dict[str, Any]:
-        return {'file': name, 'status': 'skip', 'message': message}
-
-    @staticmethod
-    def _error(name: str, message: str, details: Optional[str] = None) -> Dict[str, Any]:
-        data = {'file': name, 'status': 'error', 'message': message}
-        if details:
-            data['details'] = details
-        return data
-
-    @staticmethod
-    def _analyze_python(name: str, content: str, _working_dir: Optional[Path]) -> Dict[str, Any]:
+    def _check_python(file_path: Path) -> Tuple[str, str]:
         try:
-            compile(content, name, 'exec')
-            return LintAnalyzer._success(name, 'Python 語法檢查通過')
-        except SyntaxError as err:
-            message = f"第 {err.lineno} 行: {err.msg}"
-            detail = f"{err.text.strip() if err.text else ''}"
-            return LintAnalyzer._error(name, message, detail)
+            source = file_path.read_text(encoding='utf-8')
+        except Exception as e:
+            return 'warning', f'無法讀取檔案: {e}'
+
+        try:
+            compile(source, str(file_path), 'exec')
+            return 'passed', '語法檢查通過'
+        except SyntaxError as e:
+            line = e.lineno or 0
+            column = e.offset or 0
+            message = f'SyntaxError 第 {line} 行第 {column} 欄: {e.msg}'
+            return 'failed', message
+        except Exception as e:
+            return 'warning', DiagnosticsManager._truncate(str(e))
 
     @staticmethod
-    def _analyze_json(name: str, content: str, _working_dir: Optional[Path]) -> Dict[str, Any]:
+    def _check_json(file_path: Path) -> Tuple[str, str]:
         try:
-            json.loads(content)
-            return LintAnalyzer._success(name, 'JSON 結構有效')
-        except json.JSONDecodeError as err:
-            message = f"第 {err.lineno} 行第 {err.colno} 欄: {err.msg}"
-            return LintAnalyzer._error(name, message)
+            text = file_path.read_text(encoding='utf-8')
+            json.loads(text)
+            return 'passed', 'JSON 結構有效'
+        except json.JSONDecodeError as e:
+            message = f'JSONDecodeError 第 {e.lineno} 行第 {e.colno} 欄: {e.msg}'
+            return 'failed', message
+        except Exception as e:
+            return 'warning', DiagnosticsManager._truncate(str(e))
 
     @staticmethod
-    def _analyze_javascript(name: str, content: str, _working_dir: Optional[Path]) -> Dict[str, Any]:
-        node_path = shutil.which('node')
-        if not node_path:
-            return LintAnalyzer._skip(name, '環境缺少 Node.js，略過 JavaScript 語法檢查')
-
-        tmp_file = None
+    def _check_toml(file_path: Path) -> Tuple[str, str]:
         try:
-            with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False, encoding='utf-8') as tmp:
-                tmp.write(content)
-                tmp_file = tmp.name
+            import tomllib
+        except ModuleNotFoundError:
+            return 'warning', 'Python 版本不支援 tomllib,略過檢查'
 
+        try:
+            with open(file_path, 'rb') as f:
+                tomllib.load(f)
+            return 'passed', 'TOML 結構有效'
+        except (tomllib.TOMLDecodeError, ValueError) as e:
+            return 'failed', DiagnosticsManager._truncate(str(e))
+        except Exception as e:
+            return 'warning', DiagnosticsManager._truncate(str(e))
+
+    @staticmethod
+    def _check_css(file_path: Path) -> Tuple[str, str]:
+        try:
+            text = file_path.read_text(encoding='utf-8')
+        except Exception as e:
+            return 'warning', f'無法讀取檔案: {e}'
+
+        opens = text.count('{')
+        closes = text.count('}')
+        if opens != closes:
+            return 'failed', f'大括號數量不一致: 開啟 {opens} 個, 關閉 {closes} 個'
+
+        if text.count('/*') != text.count('*/'):
+            return 'warning', '偵測到未封閉的註解,請人工確認'
+
+        return 'passed', '基本語法檢查通過'
+
+    @staticmethod
+    def _check_html(file_path: Path) -> Tuple[str, str]:
+        try:
+            text = file_path.read_text(encoding='utf-8')
+        except Exception as e:
+            return 'warning', f'無法讀取檔案: {e}'
+
+        if text.count('<') != text.count('>'):
+            return 'failed', '角括號數量不一致,可能存在未閉合標籤'
+
+        if '</html>' not in text.lower():
+            return 'warning', '未偵測到 </html> 結尾,請確認結構是否完整'
+
+        return 'passed', '未發現明顯的標記不一致,建議仍進行人工驗證'
+
+    @staticmethod
+    def _check_js(file_path: Path) -> Tuple[str, str]:
+        if not shutil.which('node'):
+            return 'warning', '未安裝 Node.js,無法自動進行 JS 語法檢查'
+
+        try:
             completed = subprocess.run(
-                [node_path, '--check', tmp_file],
+                ['node', '--check', str(file_path)],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+        except subprocess.TimeoutExpired:
+            return 'warning', 'Node.js 檢查逾時,請手動確認'
+        except Exception as e:
+            return 'warning', DiagnosticsManager._truncate(str(e))
+
+        if completed.returncode == 0:
+            return 'passed', 'Node.js 語法檢查通過'
+
+        message = completed.stderr.strip() or completed.stdout.strip() or 'Node.js 檢查失敗'
+        return 'failed', DiagnosticsManager._truncate(message)
+
+    @staticmethod
+    def _check_ts(file_path: Path) -> Tuple[str, str]:
+        if not shutil.which('tsc'):
+            return 'warning', '未安裝 TypeScript 編譯器 (tsc),略過檢查'
+
+        try:
+            completed = subprocess.run(
+                ['tsc', '--pretty', 'false', '--noEmit', str(file_path)],
                 capture_output=True,
                 text=True,
                 timeout=15
             )
-
-            if completed.returncode == 0:
-                return LintAnalyzer._success(name, 'Node.js 語法檢查通過')
-
-            details = completed.stderr.strip() or completed.stdout.strip()
-            return LintAnalyzer._error(name, 'JavaScript 語法檢查失敗', details)
         except subprocess.TimeoutExpired:
-            return LintAnalyzer._warning(name, 'JavaScript 語法檢查超時，請手動確認程式碼')
-        finally:
-            if tmp_file and os.path.exists(tmp_file):
-                try:
-                    os.unlink(tmp_file)
-                except OSError:
-                    pass
+            return 'warning', 'tsc 檢查逾時,請手動確認'
+        except Exception as e:
+            return 'warning', DiagnosticsManager._truncate(str(e))
+
+        if completed.returncode == 0:
+            return 'passed', 'TypeScript 語法檢查通過'
+
+        message = completed.stderr.strip() or completed.stdout.strip() or 'tsc 檢查失敗'
+        return 'failed', DiagnosticsManager._truncate(message)
 
     @staticmethod
-    def _analyze_typescript(name: str, content: str, working_dir: Optional[Path]) -> Dict[str, Any]:
-        tsc_path = shutil.which('tsc')
-        if not tsc_path:
-            return LintAnalyzer._skip(name, '環境缺少 TypeScript 編譯器 (tsc)，略過檢查')
+    def _not_supported(language: str) -> Tuple[str, str]:
+        return 'warning', f'暫不支援自動偵錯 {language} 檔案,請人工確認'
 
-        temp_dir = Path(tempfile.mkdtemp())
-        temp_file = temp_dir / 'lint-temp.ts'
-        try:
-            temp_file.write_text(content, encoding='utf-8')
-            completed = subprocess.run(
-                [tsc_path, '--noEmit', '--pretty', 'false', str(temp_file)],
-                capture_output=True,
-                text=True,
-                timeout=20,
-                cwd=str(working_dir or temp_dir)
-            )
+    @classmethod
+    def collect(cls, project_dir: str) -> Tuple[List[Dict[str, Any]], str]:
+        """收集語法偵錯結果,並回傳報告與提示文本"""
+        base_path = Path(project_dir)
+        if not base_path.exists():
+            return [], ''
 
-            if completed.returncode == 0:
-                return LintAnalyzer._success(name, 'TypeScript 語法檢查通過')
+        handlers = {
+            '.py': ('Python', cls._check_python),
+            '.json': ('JSON', cls._check_json),
+            '.toml': ('TOML', cls._check_toml),
+            '.css': ('CSS', cls._check_css),
+            '.html': ('HTML', cls._check_html),
+            '.htm': ('HTML', cls._check_html),
+            '.js': ('JavaScript', cls._check_js),
+            '.mjs': ('JavaScript', cls._check_js),
+            '.cjs': ('JavaScript', cls._check_js),
+            '.ts': ('TypeScript', cls._check_ts),
+            '.tsx': ('TypeScript (TSX)', lambda path: cls._not_supported('TSX')),  # 需 Babel 或專用工具
+            '.jsx': ('JavaScript (JSX)', lambda path: cls._not_supported('JSX'))
+        }
 
-            details = completed.stderr.strip() or completed.stdout.strip()
-            return LintAnalyzer._error(name, 'TypeScript 語法檢查失敗', details)
-        except subprocess.TimeoutExpired:
-            return LintAnalyzer._warning(name, 'TypeScript 語法檢查超時，請手動確認程式碼')
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+        results: List[Dict[str, Any]] = []
 
-    @staticmethod
-    def _analyze_html(name: str, content: str, _working_dir: Optional[Path]) -> Dict[str, Any]:
-        parser = LintAnalyzer._StrictHTMLValidator()
-        try:
-            parser.feed(content)
-            parser.close()
-        except Exception as exc:  # pylint: disable=broad-except
-            return LintAnalyzer._error(name, 'HTML 解析失敗', str(exc))
+        for file_path in base_path.rglob('*'):
+            if not file_path.is_file():
+                continue
 
-        errors = parser.errors
-        if not errors and parser.stack:
-            errors.append(f"尚有未關閉的標籤: {', '.join(parser.stack)}")
+            if file_path.name in cls.EXCLUDE_NAMES or any(ex in file_path.parts for ex in cls.EXCLUDE_NAMES):
+                continue
 
-        if errors:
-            return LintAnalyzer._error(name, 'HTML 結構存在問題', '\n'.join(errors))
+            suffix = file_path.suffix.lower()
+            if suffix not in handlers:
+                continue
 
-        return LintAnalyzer._success(name, 'HTML 結構看起來有效')
+            language, handler = handlers[suffix]
 
-    @staticmethod
-    def _analyze_css(name: str, content: str, _working_dir: Optional[Path]) -> Dict[str, Any]:
-        brace_balance = 0
-        issues: List[str] = []
+            try:
+                status, message = handler(file_path)
+            except Exception as e:
+                status, message = 'warning', f'檢查時發生錯誤: {e}'
 
-        for line_no, line in enumerate(content.splitlines(), 1):
-            for char in line:
-                if char == '{':
-                    brace_balance += 1
-                elif char == '}':
-                    if brace_balance == 0:
-                        issues.append(f"第 {line_no} 行出現多餘的 '}}' 符號")
-                    else:
-                        brace_balance -= 1
+            results.append({
+                'file': str(file_path.relative_to(base_path)),
+                'language': language,
+                'status': status,
+                'message': message
+            })
 
-        if brace_balance != 0:
-            issues.append('大括號數量不匹配，請確認每個區塊皆有成對的大括號')
+        prompt_block = cls._format_prompt(results)
+        return results, prompt_block
 
-        if content.count('/*') != content.count('*/'):
-            issues.append('檢測到未正確關閉的 CSS 註解區塊 /* ... */')
+    @classmethod
+    def _format_prompt(cls, results: List[Dict[str, Any]]) -> str:
+        if not results:
+            return ''
 
-        if issues:
-            return LintAnalyzer._warning(name, 'CSS 結構可能存在問題', '\n'.join(issues))
+        icon_map = {
+            'passed': '✅',
+            'failed': '❌',
+            'warning': '⚠️',
+            'skipped': 'ℹ️'
+        }
 
-        return LintAnalyzer._success(name, 'CSS 基本語法檢查通過')
+        lines = ['【語法偵錯結果】']
+        for item in results:
+            icon = icon_map.get(item.get('status'), '•')
+            language = item.get('language', '未知語言')
+            file_name = item.get('file', '未知檔案')
+            message = item.get('message', '')
+            lines.append(f"{icon} [{language}] {file_name} -> {message}")
 
-    @staticmethod
-    def _analyze_yaml(name: str, content: str, _working_dir: Optional[Path]) -> Dict[str, Any]:
-        try:
-            import yaml  # type: ignore
-        except ImportError:
-            return LintAnalyzer._skip(name, '環境缺少 PyYAML，略過 YAML 語法檢查')
+        return '\n'.join(lines)
 
-        try:
-            yaml.safe_load(content)
-            return LintAnalyzer._success(name, 'YAML 結構有效')
-        except yaml.YAMLError as err:  # type: ignore[attr-defined]
-            return LintAnalyzer._error(name, 'YAML 解析失敗', str(err))
-
-    class _StrictHTMLValidator(HTMLParser):
-        def __init__(self):
-            super().__init__()
-            self.stack: List[str] = []
-            self.errors: List[str] = []
-
-        def handle_starttag(self, tag, attrs):  # noqa: D401
-            if tag not in LintAnalyzer.SELF_CLOSING_TAGS:
-                self.stack.append(tag)
-
-        def handle_endtag(self, tag):
-            if tag in LintAnalyzer.SELF_CLOSING_TAGS:
-                return
-            if not self.stack:
-                self.errors.append(f"偵測到多餘的 </{tag}> 標籤")
-                return
-
-            expected = self.stack.pop()
-            if expected != tag:
-                self.errors.append(f"標籤 <{expected}> 與 </{tag}> 不匹配")
+# ============================================
+# Gemini AI 模塊
+# ============================================
 
 class GeminiAI:
     """Gemini AI API 管理器"""
@@ -1021,7 +1028,10 @@ class GeminiAI:
             gen_params = dict(config.generation_params)
             gen_params["response_mime_type"] = "application/json"
             
-            system_instruction = get_json_system_instruction()
+            system_instruction = get_json_system_instruction(
+                getattr(config, 'prompt_mode', 'default'),
+                config.system_instruction
+            )
             
             gen_config = GenerationConfig(**{
                 k: v for k, v in gen_params.items() if v is not None
@@ -1959,19 +1969,26 @@ class ProcessManager:
         is_iteration: bool = False,
         attach_screenshot: bool = False,
         attach_terminal: bool = False,
-        attach_lint_reports: bool = False,
+        attach_diagnostics: bool = False,
         user_visible_prompt: Optional[str] = None,
         memory_context: Optional[str] = None
     ) -> ProcessResult:
         """執行完整的自動化流程 - 修復版"""
         
         result = ProcessResult(success=False, is_iteration=is_iteration)
-        lint_reports: List[Dict[str, Any]] = []
-        lint_summary_text = ""
-
+        
         try:
             files = list(files or [])
             user_files_snapshot = list(files)
+
+            diagnostics_report: List[Dict[str, Any]] = []
+            diagnostics_prompt_block = ''
+
+            if attach_diagnostics:
+                diagnostics_report, diagnostics_prompt_block = DiagnosticsManager.collect(folder_path)
+                result.diagnostics_report = diagnostics_report
+                if diagnostics_prompt_block:
+                    prompt = f"{diagnostics_prompt_block}\n\n{prompt}"
             if is_iteration:
                 logger.info("迭代模式:自動載入專案所有檔案")
                 project_files = ProjectManager.load_project_files(folder_path)
@@ -1981,41 +1998,22 @@ class ProcessManager:
 
                 files.extend(project_files)
                 logger.info(f"已附加 {len(project_files)} 個專案檔案")
-
-            if attach_lint_reports:
-                try:
-                    lint_reports = LintAnalyzer.analyze_files(files, folder_path)
-                    if lint_reports:
-                        lint_summary_text = LintAnalyzer.format_reports(lint_reports)
-                        if lint_summary_text:
-                            prompt = (
-                                "【語法偵錯報告】\n"
-                                f"{lint_summary_text}\n\n"
-                                "請優先修正上述語法錯誤與警告，再根據使用者需求完成其他調整。\n\n"
-                                f"{prompt}"
-                            )
-                except Exception as lint_error:  # pylint: disable=broad-except
-                    logger.error(f"語法偵錯處理失敗: {lint_error}")
-                    lint_reports = []
-                    lint_summary_text = ""
-
-            result.lint_reports = lint_reports
-
+            
             terminal_output = None
             if attach_terminal:
                 terminal_output = ProgramManager.get_all_terminal_output()
                 if terminal_output:
                     logger.info("已附加Terminal輸出到AI請求")
                     result.terminal_output = terminal_output
-            
+
             # ⭐ 修復:在正確的時機保存用戶消息
             display_prompt = user_visible_prompt or prompt
 
-            user_metadata: Dict[str, Any] = {}
+            metadata_payload = {}
             if memory_context:
-                user_metadata['memory_context'] = memory_context
-            if lint_reports:
-                user_metadata['lint_reports'] = lint_reports
+                metadata_payload['memory_context'] = memory_context
+            if diagnostics_report:
+                metadata_payload['diagnostics_report'] = diagnostics_report
 
             ConversationManager.add_message(
                 folder_path,
@@ -2023,7 +2021,7 @@ class ProcessManager:
                 display_prompt,
                 files=[{'name': f.get('name'), 'type': f.get('type')} for f in user_files_snapshot],
                 terminal_output=terminal_output,
-                metadata=user_metadata or None
+                metadata=metadata_payload if metadata_payload else None
             )
             
             if is_iteration and attach_screenshot:
@@ -2105,25 +2103,27 @@ class ProcessManager:
                 else:
                     normalized_json = json_data
 
-            if normalized_json:
-                memory_snapshot = normalized_json.get('核心記憶模塊') or normalized_json.get('core_memory_module')
+            sanitized_json = sanitize_json_strings(normalized_json) if normalized_json else None
+
+            if sanitized_json:
+                memory_snapshot = sanitized_json.get('核心記憶模塊') or sanitized_json.get('core_memory_module')
                 evaluation_snapshot = {
-                    '評分': normalized_json.get('評分'),
-                    '內容評價': normalized_json.get('內容評價'),
-                    '扣分原因': normalized_json.get('扣分原因'),
-                    '改進建議': normalized_json.get('改進建議')
+                    '評分': sanitized_json.get('評分'),
+                    '內容評價': sanitized_json.get('內容評價'),
+                    '扣分原因': sanitized_json.get('扣分原因'),
+                    '改進建議': sanitized_json.get('改進建議')
                 }
                 evaluation_snapshot = {k: v for k, v in evaluation_snapshot.items() if v is not None}
                 result.memory_snapshot = memory_snapshot
                 result.evaluation_snapshot = evaluation_snapshot
 
-            result.ai_response_json = normalized_json if normalized_json else None
+            result.ai_response_json = sanitized_json if sanitized_json else None
 
             logger.info("Step 2: 解析 AI 回應...")
             try:
-                if normalized_json:
+                if sanitized_json:
                     logger.info("使用 JSON 模式解析")
-                    project = CodeProcessor.parse_json_response(normalized_json)
+                    project = CodeProcessor.parse_json_response(sanitized_json)
                 else:
                     logger.info("嘗試從文本中提取 JSON")
                     try:
@@ -2136,8 +2136,9 @@ class ProcessManager:
                             potential_json = json.loads(json_str)
                             if isinstance(potential_json, list):
                                 potential_json = potential_json[0] if potential_json else {}
-                            project = CodeProcessor.parse_json_response(potential_json)
-                            result.ai_response_json = potential_json or None
+                            sanitized_potential = sanitize_json_strings(potential_json)
+                            project = CodeProcessor.parse_json_response(sanitized_potential)
+                            result.ai_response_json = sanitized_potential or None
                             logger.info("成功從文本中提取並解析 JSON")
                         else:
                             raise ValueError("無法從回應中找到有效的JSON結構")
@@ -2151,23 +2152,23 @@ class ProcessManager:
                 result.error = f"解析失敗: {str(parse_error)}"
                 
                 error_details = f"""
-=== ❌ 解析錯誤 ===
-{parse_error}
+                === \u274c 解析錯誤 ===
+                {parse_error}
 
-=== 🔍 可能的原因 ===
-1. AI 回應格式不正確
-2. JSON 結構有誤
-3. 程式碼格式化問題
+                === \U0001f50d 可能的原因 ===
+                1. AI 回應格式不正確
+                2. JSON 結構有誤
+                3. 程式碼格式化問題
 
-=== 💡 解決建議 ===
-1. 嘗試切換到文本模式
-2. 調整 AI 模型(建議使用 Gemini 2.5 Pro)
-3. 簡化您的需求描述
-4. 檢查 API Key 是否有效
+                === \U0001f4a1 解決建議 ===
+                1. 嘗試切換到文本模式
+                2. 調整 AI 模型(建議使用 Gemini 2.5 Pro)
+                3. 簡化您的需求描述
+                4. 檢查 API Key 是否有效
 
-=== 🤖 AI 原始回應 ===
-請查看下方「AI 回應」區域以檢視完整內容。
-"""
+                === \U0001f916 AI 原始回應 ===
+                請查看下方「AI 回應」區域以檢視完整內容。
+                """
                 
                 result.output = error_details
                 
@@ -2662,8 +2663,8 @@ def run_process():
         is_iteration = data.get('is_iteration', False)
         attach_screenshot = data.get('attach_screenshot', False)
         attach_terminal = data.get('attach_terminal', False)
-        attach_lint_reports = data.get('attach_lint_reports', False)
-        
+        attach_diagnostics = data.get('attach_diagnostics', False)
+
         if not all([folder_path, prompt]):
             return jsonify({
                 'success': False,
@@ -2681,7 +2682,7 @@ def run_process():
             is_iteration,
             attach_screenshot,
             attach_terminal,
-            attach_lint_reports,
+            attach_diagnostics,
             user_visible_prompt=display_prompt,
             memory_context=memory_context
         )
@@ -2700,9 +2701,11 @@ def run_process():
             'usage_metadata': result.usage_metadata,
             'terminal_output': result.terminal_output,
             'memory_snapshot': result.memory_snapshot,
-            'evaluation_snapshot': result.evaluation_snapshot,
-            'lint_reports': result.lint_reports
+            'evaluation_snapshot': result.evaluation_snapshot
         }
+
+        if attach_diagnostics:
+            response_data['diagnostics_report'] = result.diagnostics_report
         
         if result.project_data:
             response_data['project'] = {

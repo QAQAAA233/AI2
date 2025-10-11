@@ -9,13 +9,15 @@ let isIterationMode = false;
 let currentProjectDir = null;
 let autoScreenshot = false;
 let attachTerminal = false;
+let attachDiagnostics = false;
 let allProjects = [];
 let modelConfig = null;
 let sidebarCollapsed = false;
 let MODEL_LIMITS = {};
 let projectMemoryState = {};
 let autoAttachMemory = true;
-let attachLintReports = false;
+let loadingRequestCounter = 0; // <-- 新增此行
+const messageDiagnosticsHolderMap = new WeakMap();
 
 // ============================================
 // Loading Overlay 控制 - 修復版
@@ -23,22 +25,31 @@ let attachLintReports = false;
 function showLoading(message = '處理中...') {
     const overlay = document.getElementById('loadingOverlay');
     const messageEl = document.getElementById('loadingMessage');
-    
-    if (messageEl) {
-        messageEl.textContent = message;
+
+    // 只有當第一次顯示時才更新文字，避免後來的快速任務覆蓋掉重要的提示
+    if (loadingRequestCounter === 0) {
+        if (messageEl) {
+            messageEl.textContent = message;
+        }
     }
+    
+    loadingRequestCounter++; // 增加計數
     
     if (overlay) {
         overlay.classList.add('active');
-        // 確保在最上層
         overlay.style.zIndex = '99999';
     }
 }
 
 function hideLoading() {
-    const overlay = document.getElementById('loadingOverlay');
-    if (overlay) {
-        overlay.classList.remove('active');
+    loadingRequestCounter--; // 減少計數
+
+    if (loadingRequestCounter <= 0) {
+        loadingRequestCounter = 0; // 重設以防萬一
+        const overlay = document.getElementById('loadingOverlay');
+        if (overlay) {
+            overlay.classList.remove('active');
+        }
     }
 }
 
@@ -289,6 +300,21 @@ function toggleAttachTerminal() {
     togglePlusMenu();
 }
 
+function toggleAttachDiagnostics() {
+    attachDiagnostics = !attachDiagnostics;
+    const menuItem = document.getElementById('diagnosticsMenuItem');
+    if (menuItem) {
+        if (attachDiagnostics) {
+            menuItem.classList.add('active');
+            showNotification('已啟用語法偵錯結果附加', 'success');
+        } else {
+            menuItem.classList.remove('active');
+            showNotification('已關閉語法偵錯結果附加', 'info');
+        }
+    }
+    togglePlusMenu();
+}
+
 function toggleAutoAttachMemory() {
     autoAttachMemory = !autoAttachMemory;
     const menuItem = document.getElementById('memoryMenuItem');
@@ -304,19 +330,84 @@ function toggleAutoAttachMemory() {
     togglePlusMenu();
 }
 
-function toggleAttachLintReports() {
-    attachLintReports = !attachLintReports;
-    const menuItem = document.getElementById('lintMenuItem');
-    if (menuItem) {
-        if (attachLintReports) {
-            menuItem.classList.add('active');
-            showNotification('已啟用語法偵錯報告', 'success');
-        } else {
-            menuItem.classList.remove('active');
-            showNotification('已關閉語法偵錯報告', 'info');
-        }
+function diagnosticsStatusIcon(status) {
+    switch (status) {
+        case 'passed':
+            return '✅';
+        case 'failed':
+            return '❌';
+        case 'warning':
+            return '⚠️';
+        case 'skipped':
+            return 'ℹ️';
+        default:
+            return '•';
     }
-    togglePlusMenu();
+}
+
+function applyDiagnosticsToMessage(messageElement, report = []) {
+    if (!messageElement) return;
+    const holder = messageDiagnosticsHolderMap.get(messageElement);
+    if (!holder) return;
+
+    holder.innerHTML = '';
+
+    const safeReport = Array.isArray(report) ? report : [];
+    const details = document.createElement('details');
+    details.className = 'diagnostics-details';
+    if (safeReport.some(item => item && item.status === 'failed')) {
+        details.open = true;
+    }
+
+    const summary = document.createElement('summary');
+    const count = safeReport.length;
+    summary.textContent = `語法偵錯結果（${count}）`;
+    details.appendChild(summary);
+
+    if (count === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'diagnostics-empty';
+        empty.textContent = '未找到可用的語法偵錯資訊，請確認專案檔案是否支援自動檢查。';
+        details.appendChild(empty);
+    } else {
+        const list = document.createElement('ul');
+        list.className = 'diagnostics-list';
+
+        safeReport.forEach(item => {
+            if (!item) return;
+            const listItem = document.createElement('li');
+            listItem.className = 'diagnostics-item';
+
+            const status = item.status || 'info';
+            listItem.dataset.status = status;
+
+            const icon = document.createElement('span');
+            icon.className = 'diagnostics-icon';
+            icon.textContent = diagnosticsStatusIcon(status);
+
+            const content = document.createElement('div');
+            content.className = 'diagnostics-content';
+
+            const header = document.createElement('div');
+            header.className = 'diagnostics-header';
+            const language = item.language || '未知語言';
+            const fileName = item.file || '未知檔案';
+            header.textContent = `[${language}] ${fileName}`;
+
+            const message = document.createElement('div');
+            message.className = 'diagnostics-message';
+            message.textContent = item.message || '';
+
+            content.append(header, message);
+            listItem.append(icon, content);
+            list.appendChild(listItem);
+        });
+
+        details.appendChild(list);
+    }
+
+    holder.appendChild(details);
+    holder.style.display = 'block';
 }
 
 function getCurrentMemoryState() {
@@ -360,142 +451,6 @@ function updateMemoryMenuHint() {
     }
 }
 
-function renderMemoryTextBlock(container, rawValue, emptyText, enforceList = false) {
-    if (!container) return;
-
-    container.innerHTML = '';
-    container.dataset.empty = 'false';
-
-    const value = typeof rawValue === 'string' ? rawValue.trim() : '';
-    if (!value) {
-        container.textContent = emptyText;
-        container.dataset.empty = 'true';
-        return;
-    }
-
-    const lines = value.split(/\r?\n+/).map(line => line.trim()).filter(Boolean);
-
-    if (!enforceList || lines.length <= 1) {
-        const cleaned = value.replace(/^([•\-\d\.]+\s+)/, '').trim();
-        container.textContent = cleaned || value;
-        return;
-    }
-
-    const list = document.createElement('ul');
-    list.className = 'memory-bullet-list';
-
-    lines.forEach(line => {
-        const cleaned = line.replace(/^([•\-\d\.]+\s+)/, '').trim();
-        const item = document.createElement('li');
-        item.textContent = cleaned || line;
-        list.appendChild(item);
-    });
-
-    container.appendChild(list);
-}
-
-function renderLintStatusBadge(status) {
-    const badge = document.createElement('span');
-    badge.className = 'lint-status-tag';
-
-    const normalized = (status || '').toString().toLowerCase();
-    const labelMap = {
-        pass: '通過',
-        warning: '警告',
-        error: '錯誤',
-        skip: '略過'
-    };
-
-    if (normalized === 'pass') {
-        badge.classList.add('ok');
-    } else if (normalized === 'warning') {
-        badge.classList.add('warn');
-    } else if (normalized === 'error') {
-        badge.classList.add('error');
-    } else {
-        badge.classList.add('skip');
-    }
-
-    badge.textContent = labelMap[normalized] || '資訊';
-    return badge;
-}
-
-function createLintReportSection(lintReports = []) {
-    if (!Array.isArray(lintReports) || lintReports.length === 0) {
-        return null;
-    }
-
-    const details = document.createElement('details');
-    details.className = 'lint-report-details';
-
-    const summaryEl = document.createElement('summary');
-    summaryEl.textContent = '語法偵錯結果';
-    details.appendChild(summaryEl);
-
-    const list = document.createElement('div');
-    list.className = 'lint-report-list';
-
-    lintReports.forEach(report => {
-        if (!report) return;
-
-        const item = document.createElement('div');
-        item.className = 'lint-report-item';
-
-        const header = document.createElement('div');
-        header.className = 'lint-report-item-header';
-
-        const nameEl = document.createElement('span');
-        nameEl.className = 'lint-file-name';
-        nameEl.textContent = report.file || '未命名檔案';
-
-        const badge = renderLintStatusBadge(report.status);
-
-        header.append(nameEl, badge);
-        item.appendChild(header);
-
-        const messageEl = document.createElement('div');
-        messageEl.className = 'lint-report-message';
-        messageEl.textContent = report.message || '未提供偵錯訊息';
-        item.appendChild(messageEl);
-
-        if (report.details) {
-            const detailEl = document.createElement('div');
-            detailEl.className = 'lint-report-details-text';
-            detailEl.textContent = report.details;
-            item.appendChild(detailEl);
-        }
-
-        list.appendChild(item);
-    });
-
-    details.appendChild(list);
-    return details;
-}
-
-function lintReportsHaveIssues(lintReports) {
-    if (!Array.isArray(lintReports)) return false;
-    return lintReports.some(report => {
-        if (!report || !report.status) return false;
-        const status = report.status.toString().toLowerCase();
-        return status === 'error' || status === 'warning';
-    });
-}
-
-function appendLintReportsToMessage(messageEl, lintReports) {
-    if (!messageEl) return;
-
-    const existing = messageEl.querySelector('.lint-report-details');
-    if (existing) {
-        existing.remove();
-    }
-
-    const section = createLintReportSection(lintReports);
-    if (section) {
-        section.open = lintReportsHaveIssues(lintReports);
-        messageEl.appendChild(section);
-    }
-}
-
 function renderMemoryPanel() {
     const panel = document.getElementById('memoryPanel');
     const body = document.getElementById('memoryPanelBody');
@@ -503,11 +458,11 @@ function renderMemoryPanel() {
     const projectLabel = document.getElementById('memoryProjectLabel');
     const evaluationList = document.getElementById('memoryEvaluationList');
     const summaryBox = document.getElementById('memorySummaryBox');
-    const stmBox = document.getElementById('memorySTMBox');
-    const ltmBox = document.getElementById('memoryLTMBox');
+    const stmList = document.getElementById('memorySTMList');
+    const ltmList = document.getElementById('memoryLTMList');
     const goalsList = document.getElementById('memoryGoalsList');
 
-    if (!panel || !body || !scoreEl || !projectLabel || !evaluationList || !summaryBox || !stmBox || !ltmBox || !goalsList) {
+    if (!panel || !body || !scoreEl || !projectLabel || !evaluationList || !summaryBox || !stmList || !ltmList || !goalsList) {
         return;
     }
 
@@ -560,9 +515,34 @@ function renderMemoryPanel() {
         evaluationList.appendChild(placeholder);
     }
 
-    renderMemoryTextBlock(summaryBox, memory['專案總結'], '尚未建立專案總結');
-    renderMemoryTextBlock(stmBox, memory['短期記憶'], '尚未累積短期記憶', true);
-    renderMemoryTextBlock(ltmBox, memory['長期記憶'], '尚未建立長期記憶', true);
+    summaryBox.textContent = memory['專案總結'] || '尚未建立專案總結';
+
+    const renderList = (element, data, emptyText) => {
+        if (!element) return;
+        element.innerHTML = '';
+
+        const normalized = Array.isArray(data)
+            ? data.filter(item => item !== null && item !== undefined && `${item}`.trim() !== '')
+            : (data ? [`${data}`] : []);
+
+        if (normalized.length === 0) {
+            const placeholder = document.createElement('li');
+            placeholder.className = 'memory-placeholder';
+            placeholder.textContent = emptyText;
+            element.appendChild(placeholder);
+            return;
+        }
+
+        normalized.forEach(text => {
+            const item = document.createElement('li');
+            item.className = 'memory-bullet-item';
+            item.textContent = text;
+            element.appendChild(item);
+        });
+    };
+
+    renderList(stmList, memory['短期記憶'], '尚未累積短期記憶');
+    renderList(ltmList, memory['長期記憶'], '尚未建立長期記憶');
 
     goalsList.innerHTML = '';
     const goals = Array.isArray(memory['專案目標']) ? memory['專案目標'] : [];
@@ -617,16 +597,16 @@ function renderMemoryPanel() {
 function toggleMemoryPanel() {
     const panel = document.getElementById('memoryPanel');
     const btn = document.getElementById('memoryCollapseBtn');
-    const body = document.getElementById('memoryPanelBody');
+    const layout = document.getElementById('conversationLayout');
 
     if (!panel || !btn) return;
 
-    const collapsed = panel.classList.toggle('collapsed');
-    btn.classList.toggle('collapsed', collapsed);
-    btn.setAttribute('aria-expanded', (!collapsed).toString());
+    const isCollapsed = panel.classList.toggle('collapsed');
+    btn.classList.toggle('collapsed', isCollapsed);
+    btn.setAttribute('aria-expanded', (!isCollapsed).toString());
 
-    if (body) {
-        body.style.maxHeight = '';
+    if (layout) {
+        layout.classList.toggle('memory-panel-collapsed', isCollapsed);
     }
 }
 
@@ -696,11 +676,25 @@ async function handleSubmit() {
             if (memory['專案總結']) {
                 memoryLines.push(`專案總結：${memory['專案總結']}`);
             }
-            if (memory['短期記憶']) {
-                memoryLines.push(`短期記憶：${memory['短期記憶']}`);
+            const formatListBlock = (title, raw) => {
+                if (!raw) return null;
+                const items = Array.isArray(raw)
+                    ? raw.filter(item => item !== null && item !== undefined && `${item}`.trim() !== '')
+                    : [`${raw}`];
+
+                if (items.length === 0) return null;
+                const bullet = items.map(item => `- ${item}`).join('\n');
+                return `${title}：\n${bullet}`;
+            };
+
+            const stmBlock = formatListBlock('短期記憶', memory['短期記憶']);
+            if (stmBlock) {
+                memoryLines.push(stmBlock);
             }
-            if (memory['長期記憶']) {
-                memoryLines.push(`長期記憶：${memory['長期記憶']}`);
+
+            const ltmBlock = formatListBlock('長期記憶', memory['長期記憶']);
+            if (ltmBlock) {
+                memoryLines.push(ltmBlock);
             }
 
             const goals = Array.isArray(memory['專案目標']) ? memory['專案目標'] : [];
@@ -724,9 +718,12 @@ async function handleSubmit() {
         }
     }
 
-    const userMessageEl = addMessage('user', userPrompt, null, null, attachmentsForMessage, {
-        memoryContext: memoryContextBlock
-    });
+    const userMetadata = {};
+    if (memoryContextBlock) {
+        userMetadata.memoryContext = memoryContextBlock;
+    }
+
+    const userMessage = addMessage('user', userPrompt, null, null, attachmentsForMessage, userMetadata);
 
     input.value = '';
     updateSubmitButton();
@@ -750,17 +747,21 @@ async function handleSubmit() {
                 is_iteration: isIterationMode,
                 attach_screenshot: isIterationMode && autoScreenshot,
                 attach_terminal: attachTerminal,
-                attach_lint_reports: attachLintReports
+                attach_diagnostics: attachDiagnostics
             })
         });
 
         const result = await response.json();
 
-        if (result.success) {
-            if (userMessageEl && Array.isArray(result.lint_reports) && result.lint_reports.length > 0) {
-                appendLintReportsToMessage(userMessageEl, result.lint_reports);
+        if (userMessage) {
+            if (Array.isArray(result.diagnostics_report)) {
+                applyDiagnosticsToMessage(userMessage, result.diagnostics_report);
+            } else if (attachDiagnostics) {
+                applyDiagnosticsToMessage(userMessage, []);
             }
+        }
 
+        if (result.success) {
             addMessage('assistant', result.output, result.usage_metadata, result.terminal_output, [], {
                 evaluation: result.evaluation_snapshot,
                 memory: result.memory_snapshot
@@ -816,7 +817,7 @@ async function handleSubmit() {
 
 function addMessage(role, content, usageMetadata = null, terminalOutput = null, attachments = [], metadata = {}) {
     const container = document.getElementById('resultsContainer');
-    if (!container) return;
+    if (!container) return null;
 
     const message = document.createElement('div');
     message.className = `result-message ${role} selectable`;
@@ -873,15 +874,6 @@ function addMessage(role, content, usageMetadata = null, terminalOutput = null, 
         message.appendChild(attachmentsSection);
     }
 
-    const lintPayload = metadata && (metadata.lintReports || metadata.lint_reports);
-    if (Array.isArray(lintPayload) && lintPayload.length > 0) {
-        const lintSection = createLintReportSection(lintPayload);
-        if (lintSection) {
-            lintSection.open = lintReportsHaveIssues(lintPayload);
-            message.appendChild(lintSection);
-        }
-    }
-
     if (metadata && metadata.memoryContext) {
         const contextDetails = document.createElement('details');
         contextDetails.className = 'memory-context-details';
@@ -896,6 +888,12 @@ function addMessage(role, content, usageMetadata = null, terminalOutput = null, 
         contextDetails.append(summaryEl, contextText);
         message.appendChild(contextDetails);
     }
+
+    const diagnosticsHolder = document.createElement('div');
+    diagnosticsHolder.className = 'diagnostics-holder';
+    diagnosticsHolder.style.display = 'none';
+    message.appendChild(diagnosticsHolder);
+    messageDiagnosticsHolderMap.set(message, diagnosticsHolder);
 
     if (metadata && metadata.evaluation) {
         const evalData = metadata.evaluation;
@@ -923,7 +921,7 @@ function addMessage(role, content, usageMetadata = null, terminalOutput = null, 
             scoreRow.append(scoreLabel, scoreValueEl);
 
             const suggestionRow = document.createElement('div');
-            suggestionRow.className = 'evaluation-row';
+            suggestionRow.className = 'evaluation-row suggestion-row'; // <-- 修改此行，多加一個 'suggestion-row'
             const suggestionLabel = document.createElement('span');
             suggestionLabel.className = 'evaluation-label';
             suggestionLabel.textContent = '改進建議';
@@ -935,6 +933,14 @@ function addMessage(role, content, usageMetadata = null, terminalOutput = null, 
             evaluationBox.append(scoreRow, suggestionRow);
             message.appendChild(evaluationBox);
         }
+    }
+
+    if (metadata && metadata.memory) {
+        setProjectMemoryState(currentProjectDir, metadata.memory, metadata.evaluation || {});
+    }
+
+    if (metadata && Array.isArray(metadata.diagnosticsReport)) {
+        applyDiagnosticsToMessage(message, metadata.diagnosticsReport);
     }
 
     if (terminalOutput && terminalOutput.trim()) {
@@ -956,7 +962,6 @@ function addMessage(role, content, usageMetadata = null, terminalOutput = null, 
         message.appendChild(terminalSection);
     }
 
-    // Token使用統計只顯示在AI回應中
     if (role === 'assistant' && usageMetadata && typeof usageMetadata === 'object') {
         const tokenUsage = document.createElement('div');
         tokenUsage.className = 'token-usage';
@@ -983,6 +988,7 @@ function addMessage(role, content, usageMetadata = null, terminalOutput = null, 
 
     container.appendChild(message);
     message.scrollIntoView({ behavior: 'smooth' });
+
     return message;
 }
 
@@ -1255,8 +1261,8 @@ async function loadExistingProject(projectDir) {
                         if (rawMetadata.memory_context && !normalizedMetadata.memoryContext) {
                             normalizedMetadata.memoryContext = rawMetadata.memory_context;
                         }
-                        if (rawMetadata.lint_reports && !normalizedMetadata.lintReports) {
-                            normalizedMetadata.lintReports = rawMetadata.lint_reports;
+                        if (rawMetadata.diagnostics_report && !normalizedMetadata.diagnosticsReport) {
+                            normalizedMetadata.diagnosticsReport = rawMetadata.diagnostics_report;
                         }
 
                         addMessage(
@@ -1413,7 +1419,12 @@ async function loadSettings() {
         
         document.getElementById('apiKey').value = config.gemini_api_key || '';
         document.getElementById('modelName').value = config.model_name || 'gemini-2.5-pro';
-        
+
+        const promptModeSelect = document.getElementById('promptMode');
+        if (promptModeSelect) {
+            promptModeSelect.value = config.prompt_mode || 'default';
+        }
+
         const genParams = config.generation_params || {};
         document.getElementById('temperature').value = genParams.temperature || 0.7;
         document.getElementById('topP').value = genParams.top_p || 0.95;
@@ -1450,6 +1461,7 @@ async function saveSettings() {
             connection_method: 'api_key',
             gemini_api_key: document.getElementById('apiKey').value,
             model_name: document.getElementById('modelName').value,
+            prompt_mode: (document.getElementById('promptMode')?.value || 'default'),
             generation_params: {
                 temperature: parseFloat(document.getElementById('temperature').value),
                 top_p: parseFloat(document.getElementById('topP').value),

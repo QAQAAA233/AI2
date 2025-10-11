@@ -1,5 +1,5 @@
 # AI 自動化開發控制器 Pro v5.5
-
+# 建議使用py3.11.9
 [![Python](https://img.shields.io/badge/Python-3.11.9-blue?logo=python)](https://www.python.org/)
 [![Flask](https://img.shields.io/badge/Flask-3.0-green?logo=flask)](https://flask.palletsprojects.com/)
 [![Gemini](https://img.shields.io/badge/Gemini-2.5%20Pro-purple?logo=google)](https://ai.google.dev/)
