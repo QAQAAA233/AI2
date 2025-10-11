@@ -424,6 +424,123 @@ def sanitize_json_strings(data: Any) -> Any:
         return sanitized
 
     return data
+
+
+def _is_escaped(text: str, index: int) -> bool:
+    """判斷索引位置的字元是否被跳脫"""
+
+    backslash_count = 0
+    i = index - 1
+    while i >= 0 and text[i] == '\\':
+        backslash_count += 1
+        i -= 1
+    return backslash_count % 2 == 1
+
+
+def _reescape_string_literal_controls(code: str) -> str:
+    """將單行字串常值中的控制字元重新轉換為跳脫序列"""
+
+    if not code:
+        return code
+
+    result: List[str] = []
+    i = 0
+    length = len(code)
+    in_string = False
+    string_delim = ''
+    is_triple = False
+    in_comment = False
+
+    while i < length:
+        ch = code[i]
+
+        if in_comment:
+            result.append(ch)
+            if ch == '\n':
+                in_comment = False
+            i += 1
+            continue
+
+        if not in_string:
+            if ch == '#':
+                in_comment = True
+                result.append(ch)
+                i += 1
+                continue
+
+            if ch in ('"', "'"):
+                if code.startswith(ch * 3, i):
+                    string_delim = ch * 3
+                    is_triple = True
+                    in_string = True
+                    result.append(string_delim)
+                    i += 3
+                    continue
+                else:
+                    string_delim = ch
+                    is_triple = False
+                    in_string = True
+                    result.append(ch)
+                    i += 1
+                    continue
+
+            result.append(ch)
+            if ch == '\n':
+                in_comment = False
+            i += 1
+            continue
+
+        if is_triple:
+            if code.startswith(string_delim, i):
+                result.append(string_delim)
+                i += len(string_delim)
+                in_string = False
+                is_triple = False
+                string_delim = ''
+            else:
+                result.append(ch)
+                i += 1
+            continue
+
+        if ch in ('"', "'") and ch == string_delim and not _is_escaped(code, i):
+            result.append(ch)
+            i += 1
+            in_string = False
+            string_delim = ''
+            continue
+
+        if ch == '\n':
+            result.append('\\n')
+            i += 1
+            continue
+
+        if ch == '\r':
+            result.append('\\r')
+            i += 1
+            continue
+
+        if ch == '\t':
+            result.append('\\t')
+            i += 1
+            continue
+
+        result.append(ch)
+        i += 1
+
+    return ''.join(result)
+
+
+def normalize_code_content(code: str) -> str:
+    """恢復字串中的跳脫字元,並確保單行字串常值的控制字元重新跳脫"""
+
+    if not isinstance(code, str):
+        return code
+
+    normalized = code.replace('\\r\\n', '\n')
+    normalized = normalized.replace('\\n', '\n')
+    normalized = normalized.replace('\\t', '\t')
+
+    return _reescape_string_literal_controls(normalized)
 # ============================================
 # 配置管理模塊
 # ============================================
@@ -1435,10 +1552,7 @@ class CodeProcessor:
                 code = file_data.get('code', '')
 
                 if isinstance(code, str):
-                    code = code.replace('\\n', '\n')
-                    code = code.replace('\\t', '\t')
-                    code = code.replace('\\"', '"')
-                    code = code.replace("\\'", "'")
+                    code = normalize_code_content(code)
 
                 files.append(FileOutput(
                     filename=file_data.get('filename', 'untitled.txt'),
