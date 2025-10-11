@@ -757,6 +757,28 @@ class ConversationManager:
 
 class ProjectManager:
     """專案管理器"""
+
+    FILETYPE_MAP = {
+        '.py': 'python',
+        '.js': 'javascript',
+        '.ts': 'typescript',
+        '.jsx': 'javascript',
+        '.tsx': 'typescript',
+        '.html': 'html',
+        '.css': 'css',
+        '.json': 'json',
+        '.yml': 'yaml',
+        '.yaml': 'yaml',
+        '.md': 'markdown',
+        '.txt': 'text',
+        '.sh': 'shell',
+        '.bat': 'shell',
+        '.ps1': 'shell',
+        '.sql': 'sql',
+        '.xml': 'xml',
+        '.ini': 'text',
+        '.cfg': 'text'
+    }
     
     @staticmethod
     def load_project_info(project_dir: str) -> Optional[Dict]:
@@ -832,9 +854,9 @@ class ProjectManager:
         """添加專案到列表"""
         try:
             project_list = ProjectManager.get_project_list()
-            
+
             existing = next((p for p in project_list if p['path'] == project_dir), None)
-            
+
             if existing:
                 existing['name'] = project_name
                 existing['description'] = description
@@ -885,6 +907,30 @@ class ProjectManager:
         except Exception as e:
             logger.error(f"移除專案失敗: {e}")
             return False
+
+    @staticmethod
+    def detect_filetype(filename: str) -> str:
+        """根據副檔名推斷檔案類型"""
+        suffix = Path(filename).suffix.lower()
+        return ProjectManager.FILETYPE_MAP.get(suffix, 'text')
+
+    @staticmethod
+    def summarize_files_for_ui(files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """將檔案清單轉換為介面可用的精簡資訊"""
+        summarized = []
+
+        for file_entry in files:
+            name = file_entry.get('name')
+            if not name:
+                continue
+
+            summarized.append({
+                'filename': name,
+                'filetype': ProjectManager.detect_filetype(name),
+                'description': '既有檔案'
+            })
+
+        return summarized
 
 # ============================================
 # 語法偵錯管理
@@ -2129,6 +2175,9 @@ class ProcessManager:
             if diagnostics_report:
                 metadata_payload['diagnostics_report'] = diagnostics_report
 
+            conversation_state = ConversationManager.load_conversation(folder_path)
+            is_first_user_message = len(conversation_state.messages) == 0
+
             ConversationManager.add_message(
                 folder_path,
                 'user',
@@ -2136,6 +2185,24 @@ class ProcessManager:
                 files=[{'name': f.get('name'), 'type': f.get('type')} for f in user_files_snapshot],
                 terminal_output=terminal_output,
                 metadata=metadata_payload if metadata_payload else None
+            )
+
+            try:
+                existing_entry = next(
+                    (item for item in ProjectManager.get_project_list() if item['path'] == folder_path),
+                    None
+                )
+            except Exception:
+                existing_entry = None
+
+            placeholder_description = existing_entry['description'] if existing_entry else ''
+            if is_first_user_message and not is_iteration:
+                placeholder_description = '建立中 - 等待 AI 回應'
+
+            ProjectManager.add_to_project_list(
+                folder_path,
+                conversation_state.project_name or Path(folder_path).name,
+                placeholder_description
             )
             
             if is_iteration and attach_screenshot:
@@ -2357,6 +2424,9 @@ class ProcessManager:
             window_titles_to_capture = []
             
             ProjectManager.add_to_project_list(final_project_dir, project.project_name, project.description)
+
+            if not is_iteration and folder_path != final_project_dir:
+                ProjectManager.remove_from_project_list(folder_path)
             
             if project.main_file:
                 main_file_path = Path(final_project_dir) / project.main_file
@@ -2635,43 +2705,69 @@ def load_project():
             }), 400
         
         project_info = ProjectManager.load_project_info(project_dir)
-        if not project_info:
-            return jsonify({
-                'success': False,
-                'error': '找不到 PROJECT_INFO.json 檔案'
-            }), 404
-        
         project_files = ProjectManager.load_project_files(project_dir)
         project_structure = ProjectManager.get_project_structure(project_dir)
         conversation = ConversationManager.load_conversation(project_dir)
-        
-        # ⭐ 修復:正確序列化對話消息,保留 usage_metadata
-        messages_data = []
-        for msg in conversation.messages:
-            msg_dict = {
-                'role': msg.role,
-                'content': msg.content,
-                'timestamp': msg.timestamp,
-                'files': msg.files,
-                'metadata': msg.metadata,
-                'terminal_output': msg.terminal_output,
-                'usage_metadata': msg.usage_metadata  # ⭐ 直接傳遞
+
+        def serialize_conversation(conv: ProjectConversation) -> Dict[str, Any]:
+            messages_data = []
+            for msg in conv.messages:
+                msg_dict = {
+                    'role': msg.role,
+                    'content': msg.content,
+                    'timestamp': msg.timestamp,
+                    'files': msg.files,
+                    'metadata': msg.metadata,
+                    'terminal_output': msg.terminal_output,
+                    'usage_metadata': msg.usage_metadata
+                }
+                messages_data.append(msg_dict)
+
+            return {
+                'messages': messages_data,
+                'created_at': conv.created_at,
+                'updated_at': conv.updated_at,
+                'memory_snapshot': conv.memory_snapshot,
+                'evaluation_snapshot': conv.evaluation_snapshot
             }
-            messages_data.append(msg_dict)
-        
+
+        if not project_info:
+            project_name = conversation.project_name or Path(project_dir).name
+
+            if not conversation.messages:
+                conversation.project_name = project_name
+                ConversationManager.save_conversation(conversation)
+
+            ProjectManager.add_to_project_list(project_dir, project_name, '外部專案')
+
+            return jsonify({
+                'success': True,
+                'project_info': {
+                    'project_name': project_name,
+                    'description': '外部專案',
+                    'main_file': None,
+                    'files': ProjectManager.summarize_files_for_ui(project_files)
+                },
+                'project_files': project_files,
+                'project_structure': project_structure,
+                'files_count': len(project_files),
+                'conversation': serialize_conversation(conversation),
+                'is_external_project': True
+            })
+
+        ProjectManager.add_to_project_list(
+            project_dir,
+            project_info.get('project_name', Path(project_dir).name),
+            project_info.get('description', '')
+        )
+
         return jsonify({
             'success': True,
             'project_info': project_info,
             'project_files': project_files,
             'project_structure': project_structure,
             'files_count': len(project_files),
-            'conversation': {
-                'messages': messages_data,
-                'created_at': conversation.created_at,
-                'updated_at': conversation.updated_at,
-                'memory_snapshot': conversation.memory_snapshot,
-                'evaluation_snapshot': conversation.evaluation_snapshot
-            }
+            'conversation': serialize_conversation(conversation)
         })
         
     except Exception as e:

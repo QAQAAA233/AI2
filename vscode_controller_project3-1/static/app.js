@@ -18,6 +18,7 @@ let projectMemoryState = {};
 let autoAttachMemory = true;
 let loadingRequestCounter = 0; // <-- 新增此行
 const messageDiagnosticsHolderMap = new WeakMap();
+let projectListRefreshTimer = null;
 
 // ============================================
 // Loading Overlay 控制 - 修復版
@@ -188,19 +189,19 @@ function updateAttachedFilesDisplay() {
     const section = document.getElementById('attachedFilesSection');
     const countBadge = document.getElementById('attachedFilesCount');
     const filesList = document.getElementById('attachedFilesList');
-    
+
     if (!section || !countBadge || !filesList) return;
-    
+
     if (uploadedFiles.length === 0) {
         section.style.display = 'none';
         updateProjectPanelVisibility();
         return;
     }
-    
+
     section.style.display = 'block';
     countBadge.textContent = uploadedFiles.length;
     filesList.innerHTML = '';
-    
+
     uploadedFiles.forEach((file, index) => {
         const fileItem = document.createElement('div');
         fileItem.className = 'attached-file-item';
@@ -210,8 +211,24 @@ function updateAttachedFilesDisplay() {
         `;
         filesList.appendChild(fileItem);
     });
-    
+
     updateProjectPanelVisibility();
+}
+
+function scheduleProjectListRefresh(delay = 400) {
+    if (projectListRefreshTimer) {
+        return;
+    }
+
+    projectListRefreshTimer = setTimeout(async () => {
+        try {
+            await loadProjectsList();
+        } catch (error) {
+            console.error('刷新專案列表失敗:', error);
+        } finally {
+            projectListRefreshTimer = null;
+        }
+    }, delay);
 }
 
 // ============================================
@@ -461,6 +478,8 @@ function renderMemoryPanel() {
     const stmList = document.getElementById('memorySTMList');
     const ltmList = document.getElementById('memoryLTMList');
     const goalsList = document.getElementById('memoryGoalsList');
+    const layout = document.getElementById('conversationLayout');
+    const collapseBtn = document.getElementById('memoryCollapseBtn');
 
     if (!panel || !body || !scoreEl || !projectLabel || !evaluationList || !summaryBox || !stmList || !ltmList || !goalsList) {
         return;
@@ -468,13 +487,35 @@ function renderMemoryPanel() {
 
     if (!currentProjectDir) {
         panel.style.display = 'none';
+        panel.dataset.visible = 'false';
         body.style.maxHeight = 'none';
+        if (layout) {
+            layout.classList.remove('active-project');
+        }
+        if (collapseBtn) {
+            collapseBtn.classList.remove('collapsed');
+            collapseBtn.setAttribute('aria-expanded', 'false');
+        }
         return;
     }
 
+    const wasHidden = panel.dataset.visible !== 'true';
     panel.style.display = 'flex';
+    panel.dataset.visible = 'true';
     body.style.maxHeight = 'none';
     projectLabel.textContent = currentProject?.name || '未命名專案';
+
+    if (layout) {
+        layout.classList.add('active-project');
+    }
+
+    if (wasHidden) {
+        panel.classList.remove('collapsed');
+        if (collapseBtn) {
+            collapseBtn.classList.remove('collapsed');
+            collapseBtn.setAttribute('aria-expanded', 'true');
+        }
+    }
 
     const state = getCurrentMemoryState();
     const evaluation = state?.evaluation || {};
@@ -654,6 +695,8 @@ async function handleSubmit() {
         createNewProject();
         return;
     }
+
+    scheduleProjectListRefresh();
 
     document.getElementById('emptyState').style.display = 'none';
     document.getElementById('resultsContainer').style.display = 'block';
@@ -1040,7 +1083,9 @@ async function createNewProject() {
             document.getElementById('emptyState').style.display = 'none';
             document.getElementById('resultsContainer').style.display = 'block';
             document.getElementById('resultsContainer').innerHTML = '';
-            
+
+            renderMemoryPanel();
+
             showNotification('已選擇專案資料夾', 'success');
             document.getElementById('mainInput')?.focus();
         } else {
@@ -1086,8 +1131,9 @@ async function selectExistingFolder() {
                 
                 document.getElementById('emptyState').style.display = 'none';
                 document.getElementById('resultsContainer').style.display = 'block';
-                
+
                 showNotification(`已載入專案: ${currentProject.name}`, 'success');
+                loadProjectsList();
             } else {
                 showNotification('此資料夾不是有效的專案，將作為新專案', 'warning');
                 isIterationMode = false;
@@ -1225,12 +1271,15 @@ async function loadExistingProject(projectDir) {
         const result = await response.json();
         
         if (result.success) {
+            const isExternalProject = result.is_external_project === true;
+
             currentProject = {
                 name: result.project_info.project_name,
                 description: result.project_info.description,
                 files_count: result.files_count,
                 main_file: result.project_info.main_file,
-                json_data: {
+                isExternal: isExternalProject,
+                json_data: isExternalProject ? null : {
                     project_name: result.project_info.project_name,
                     description: result.project_info.description,
                     files: result.project_info.files,
@@ -1285,6 +1334,37 @@ async function loadExistingProject(projectDir) {
                 );
             } else {
                 setProjectMemoryState(projectDir, {}, {});
+            }
+
+            if (isExternalProject) {
+                const attachments = [];
+
+                if (typeof result.project_structure === 'string' && result.project_structure.trim()) {
+                    attachments.push({
+                        name: '_project_structure.txt',
+                        type: 'text/plain',
+                        size: result.project_structure.length,
+                        content: result.project_structure,
+                        isText: true
+                    });
+                }
+
+                if (Array.isArray(result.project_files)) {
+                    result.project_files.forEach(file => {
+                        if (!file || !file.name) return;
+                        attachments.push({
+                            name: file.name,
+                            type: file.type || 'text/plain',
+                            size: file.content ? file.content.length : 0,
+                            content: file.content,
+                            isText: true
+                        });
+                    });
+                }
+
+                uploadedFiles = attachments;
+                updateFilesPreview();
+                updateAttachedFilesDisplay();
             }
 
             return true;
