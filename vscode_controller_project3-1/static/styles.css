@@ -824,11 +824,12 @@ body {
     display: flex;
     gap: 20px;
     width: 100%;
-    align-items: stretch;
+    align-items: flex-start;
 }
 
 .results-container {
-    flex: 1;
+    flex: 1 1 auto;
+    min-width: 0;
     max-width: 1000px;
     width: 100%;
     margin: 0;
@@ -847,6 +848,7 @@ body {
 .memory-panel {
     width: 320px;
     min-width: 320px;
+    flex-shrink: 0;
     background: var(--bg-primary);
     border: 1px solid var(--border-light);
     border-radius: 12px;
