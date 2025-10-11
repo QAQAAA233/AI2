@@ -424,6 +424,123 @@ def sanitize_json_strings(data: Any) -> Any:
         return sanitized
 
     return data
+
+
+def _is_escaped(text: str, index: int) -> bool:
+    """判斷索引位置的字元是否被跳脫"""
+
+    backslash_count = 0
+    i = index - 1
+    while i >= 0 and text[i] == '\\':
+        backslash_count += 1
+        i -= 1
+    return backslash_count % 2 == 1
+
+
+def _reescape_string_literal_controls(code: str) -> str:
+    """將單行字串常值中的控制字元重新轉換為跳脫序列"""
+
+    if not code:
+        return code
+
+    result: List[str] = []
+    i = 0
+    length = len(code)
+    in_string = False
+    string_delim = ''
+    is_triple = False
+    in_comment = False
+
+    while i < length:
+        ch = code[i]
+
+        if in_comment:
+            result.append(ch)
+            if ch == '\n':
+                in_comment = False
+            i += 1
+            continue
+
+        if not in_string:
+            if ch == '#':
+                in_comment = True
+                result.append(ch)
+                i += 1
+                continue
+
+            if ch in ('"', "'"):
+                if code.startswith(ch * 3, i):
+                    string_delim = ch * 3
+                    is_triple = True
+                    in_string = True
+                    result.append(string_delim)
+                    i += 3
+                    continue
+                else:
+                    string_delim = ch
+                    is_triple = False
+                    in_string = True
+                    result.append(ch)
+                    i += 1
+                    continue
+
+            result.append(ch)
+            if ch == '\n':
+                in_comment = False
+            i += 1
+            continue
+
+        if is_triple:
+            if code.startswith(string_delim, i):
+                result.append(string_delim)
+                i += len(string_delim)
+                in_string = False
+                is_triple = False
+                string_delim = ''
+            else:
+                result.append(ch)
+                i += 1
+            continue
+
+        if ch in ('"', "'") and ch == string_delim and not _is_escaped(code, i):
+            result.append(ch)
+            i += 1
+            in_string = False
+            string_delim = ''
+            continue
+
+        if ch == '\n':
+            result.append('\\n')
+            i += 1
+            continue
+
+        if ch == '\r':
+            result.append('\\r')
+            i += 1
+            continue
+
+        if ch == '\t':
+            result.append('\\t')
+            i += 1
+            continue
+
+        result.append(ch)
+        i += 1
+
+    return ''.join(result)
+
+
+def normalize_code_content(code: str) -> str:
+    """恢復字串中的跳脫字元,並確保單行字串常值的控制字元重新跳脫"""
+
+    if not isinstance(code, str):
+        return code
+
+    normalized = code.replace('\\r\\n', '\n')
+    normalized = normalized.replace('\\n', '\n')
+    normalized = normalized.replace('\\t', '\t')
+
+    return _reescape_string_literal_controls(normalized)
 # ============================================
 # 配置管理模塊
 # ============================================
@@ -661,7 +778,7 @@ class ProjectManager:
         """載入專案所有檔案內容"""
         project_dir_path = Path(project_dir)
         files_data = []
-        
+
         exclude = {'PROJECT_INFO.json', '__pycache__', '.git', 'node_modules', 'venv', '.vscode'}
         
         for file_path in project_dir_path.rglob('*'):
@@ -682,15 +799,95 @@ class ProjectManager:
                     logger.info(f"已載入檔案: {rel_path}")
                 except Exception as e:
                     logger.warning(f"無法讀取檔案 {file_path}: {e}")
-        
+
         return files_data
-    
+
+    @staticmethod
+    def _infer_filetype(path: Path) -> str:
+        """根據副檔名推斷檔案類型"""
+        mapping = {
+            'py': 'python',
+            'js': 'javascript',
+            'ts': 'typescript',
+            'tsx': 'tsx',
+            'jsx': 'jsx',
+            'html': 'html',
+            'css': 'css',
+            'scss': 'scss',
+            'sass': 'sass',
+            'json': 'json',
+            'md': 'markdown',
+            'txt': 'text',
+            'yml': 'yaml',
+            'yaml': 'yaml',
+            'toml': 'toml',
+            'ini': 'ini',
+            'cfg': 'config',
+            'env': 'config',
+            'sh': 'shell',
+            'bat': 'batch',
+            'ps1': 'powershell',
+            'go': 'go',
+            'rs': 'rust',
+            'java': 'java',
+            'kt': 'kotlin',
+            'swift': 'swift',
+            'c': 'c',
+            'cpp': 'cpp',
+            'h': 'c-header',
+            'hpp': 'cpp-header',
+            'cs': 'csharp',
+            'php': 'php',
+            'rb': 'ruby',
+            'pl': 'perl',
+            'sql': 'sql',
+            'vue': 'vue',
+            'svelte': 'svelte',
+            'xml': 'xml',
+            'csv': 'csv',
+            'tsv': 'tsv',
+            'ipynb': 'notebook'
+        }
+
+        suffix = path.suffix.lower().lstrip('.')
+        if not suffix:
+            return 'text'
+        return mapping.get(suffix, suffix)
+
+    @staticmethod
+    def build_file_metadata(project_dir: str) -> List[Dict[str, Any]]:
+        """建立資料夾內檔案的基本描述列表"""
+        project_dir_path = Path(project_dir)
+        metadata: List[Dict[str, Any]] = []
+
+        if not project_dir_path.exists():
+            return metadata
+
+        exclude = {'PROJECT_INFO.json', '__pycache__', '.git', 'node_modules', 'venv', '.vscode'}
+
+        for file_path in project_dir_path.rglob('*'):
+            if not file_path.is_file():
+                continue
+
+            if file_path.name in exclude or any(ex in file_path.parts for ex in exclude):
+                continue
+
+            rel_path = file_path.relative_to(project_dir_path)
+            metadata.append({
+                'filename': str(rel_path),
+                'filetype': ProjectManager._infer_filetype(file_path),
+                'description': '現有檔案'
+            })
+
+        metadata.sort(key=lambda item: item['filename'].lower())
+        return metadata
+
     @staticmethod
     def get_project_structure(project_dir: str) -> str:
         """獲取專案結構字符串"""
         project_dir_path = Path(project_dir)
         structure_lines = [f"專案目錄: {project_dir_path.name}\n"]
-        
+
         exclude = {'PROJECT_INFO.json', '__pycache__', '.git', 'node_modules', 'venv', '.vscode'}
         
         def build_tree(directory, prefix=""):
@@ -711,41 +908,86 @@ class ProjectManager:
         return "\n".join(structure_lines)
     
     @staticmethod
-    def add_to_project_list(project_dir: str, project_name: str, description: str = ""):
+    def add_to_project_list(project_dir: str, project_name: str, description: str = "", status: str = 'ready'):
         """添加專案到列表"""
         try:
+            normalized_dir = str(Path(project_dir))
             project_list = ProjectManager.get_project_list()
-            
-            existing = next((p for p in project_list if p['path'] == project_dir), None)
-            
+
+            existing = next((p for p in project_list if p['path'] == normalized_dir), None)
+
             if existing:
                 existing['name'] = project_name
                 existing['description'] = description
                 existing['last_accessed'] = datetime.now().isoformat()
+                if status:
+                    existing['status'] = status
+                else:
+                    existing.pop('status', None)
             else:
-                project_list.append({
-                    'path': project_dir,
+                entry = {
+                    'path': normalized_dir,
                     'name': project_name,
                     'description': description,
                     'created_at': datetime.now().isoformat(),
                     'last_accessed': datetime.now().isoformat()
-                })
-            
+                }
+                if status:
+                    entry['status'] = status
+                project_list.append(entry)
+
             with open(PROJECT_LIST_FILE, 'w', encoding='utf-8') as f:
                 json.dump(project_list, f, indent=2, ensure_ascii=False)
-            
-            logger.info(f"已添加/更新專案到列表: {project_name}")
+
+            logger.info(f"已添加/更新專案到列表: {project_name} ({normalized_dir})")
             return True
         except Exception as e:
             logger.error(f"添加專案到列表失敗: {e}")
             return False
-    
+
+    @staticmethod
+    def ensure_placeholder_project(project_dir: str, project_name: Optional[str] = None, description: str = "") -> bool:
+        """確保新建專案在等待 AI 回應時也能出現在列表中"""
+        try:
+            normalized_dir = str(Path(project_dir))
+            display_name = project_name or Path(normalized_dir).name or '建立中專案'
+            placeholder_desc = description or '專案建立中，等待 AI 回應'
+
+            project_list = ProjectManager.get_project_list()
+            existing = next((p for p in project_list if p['path'] == normalized_dir), None)
+
+            timestamp = datetime.now().isoformat()
+
+            if existing:
+                existing['name'] = display_name
+                existing['description'] = placeholder_desc
+                existing['last_accessed'] = timestamp
+                existing['status'] = 'pending'
+            else:
+                project_list.append({
+                    'path': normalized_dir,
+                    'name': display_name,
+                    'description': placeholder_desc,
+                    'created_at': timestamp,
+                    'last_accessed': timestamp,
+                    'status': 'pending'
+                })
+
+            with open(PROJECT_LIST_FILE, 'w', encoding='utf-8') as f:
+                json.dump(project_list, f, indent=2, ensure_ascii=False)
+
+            logger.info(f"已建立專案佔位: {display_name} ({normalized_dir})")
+            return True
+        except Exception as e:
+            logger.error(f"建立專案佔位失敗: {e}")
+            return False
+
     @staticmethod
     def get_project_list() -> List[Dict]:
         """獲取專案列表"""
         if not PROJECT_LIST_FILE.exists():
             return []
-        
+
         try:
             with open(PROJECT_LIST_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
@@ -757,13 +999,14 @@ class ProjectManager:
     def remove_from_project_list(project_dir: str):
         """從列表移除專案"""
         try:
+            normalized_dir = str(Path(project_dir))
             project_list = ProjectManager.get_project_list()
-            project_list = [p for p in project_list if p['path'] != project_dir]
-            
+            project_list = [p for p in project_list if p['path'] != normalized_dir]
+
             with open(PROJECT_LIST_FILE, 'w', encoding='utf-8') as f:
                 json.dump(project_list, f, indent=2, ensure_ascii=False)
-            
-            logger.info(f"已從列表移除專案: {project_dir}")
+
+            logger.info(f"已從列表移除專案: {normalized_dir}")
             return True
         except Exception as e:
             logger.error(f"移除專案失敗: {e}")
@@ -1435,10 +1678,7 @@ class CodeProcessor:
                 code = file_data.get('code', '')
 
                 if isinstance(code, str):
-                    code = code.replace('\\n', '\n')
-                    code = code.replace('\\t', '\t')
-                    code = code.replace('\\"', '"')
-                    code = code.replace("\\'", "'")
+                    code = normalize_code_content(code)
 
                 files.append(FileOutput(
                     filename=file_data.get('filename', 'untitled.txt'),
@@ -1976,10 +2216,17 @@ class ProcessManager:
         """執行完整的自動化流程 - 修復版"""
         
         result = ProcessResult(success=False, is_iteration=is_iteration)
-        
+
         try:
             files = list(files or [])
             user_files_snapshot = list(files)
+
+            normalized_folder = str(Path(folder_path))
+            if not is_iteration:
+                ProjectManager.ensure_placeholder_project(
+                    normalized_folder,
+                    Path(normalized_folder).name or '建立中專案'
+                )
 
             diagnostics_report: List[Dict[str, Any]] = []
             diagnostics_prompt_block = ''
@@ -2243,10 +2490,13 @@ class ProcessManager:
             window_titles_to_capture = []
             
             ProjectManager.add_to_project_list(final_project_dir, project.project_name, project.description)
-            
+
+            if not is_iteration and folder_path != final_project_dir:
+                ProjectManager.remove_from_project_list(folder_path)
+
             if project.main_file:
                 main_file_path = Path(final_project_dir) / project.main_file
-                
+
                 main_file_info = None
                 for file in project.files:
                     if file.filename == project.main_file:
@@ -2520,17 +2770,39 @@ def load_project():
                 'error': '專案目錄不存在'
             }), 400
         
+        project_dir_path = Path(project_dir)
         project_info = ProjectManager.load_project_info(project_dir)
-        if not project_info:
-            return jsonify({
-                'success': False,
-                'error': '找不到 PROJECT_INFO.json 檔案'
-            }), 404
-        
         project_files = ProjectManager.load_project_files(project_dir)
         project_structure = ProjectManager.get_project_structure(project_dir)
         conversation = ConversationManager.load_conversation(project_dir)
-        
+
+        is_ad_hoc_folder = False
+        if not project_info:
+            is_ad_hoc_folder = True
+            metadata_files = ProjectManager.build_file_metadata(project_dir)
+            project_info = {
+                'project_name': project_dir_path.name,
+                'description': '已匯入的現有資料夾',
+                'main_file': None,
+                'setup_instructions': [],
+                'run_instructions': [],
+                'files': metadata_files
+            }
+        else:
+            if not project_info.get('files'):
+                project_info['files'] = ProjectManager.build_file_metadata(project_dir)
+
+        if conversation.project_name != project_info.get('project_name'):
+            conversation.project_name = project_info.get('project_name', conversation.project_name)
+            ConversationManager.save_conversation(conversation)
+
+        ProjectManager.add_to_project_list(
+            project_dir,
+            project_info.get('project_name', project_dir_path.name),
+            project_info.get('description', ''),
+            status='ready'
+        )
+
         # ⭐ 修復:正確序列化對話消息,保留 usage_metadata
         messages_data = []
         for msg in conversation.messages:
@@ -2544,13 +2816,34 @@ def load_project():
                 'usage_metadata': msg.usage_metadata  # ⭐ 直接傳遞
             }
             messages_data.append(msg_dict)
-        
+
+        metadata_lookup = {}
+        for item in project_info.get('files', []) or []:
+            filename = item.get('filename')
+            if filename:
+                metadata_lookup[str(filename)] = item
+
+        auto_attach_preview = []
+        for file_data in project_files:
+            name = file_data.get('name')
+            if not name:
+                continue
+
+            meta = metadata_lookup.get(name, {})
+            preview_type = meta.get('filetype') or file_data.get('type', 'text/plain')
+            auto_attach_preview.append({
+                'name': name,
+                'type': preview_type
+            })
+
         return jsonify({
             'success': True,
             'project_info': project_info,
             'project_files': project_files,
             'project_structure': project_structure,
             'files_count': len(project_files),
+            'auto_attach_preview': auto_attach_preview,
+            'is_ad_hoc_folder': is_ad_hoc_folder,
             'conversation': {
                 'messages': messages_data,
                 'created_at': conversation.created_at,
@@ -2715,7 +3008,14 @@ def run_process():
                 'main_file': result.project_data.main_file,
                 'has_gui': any(f.opens_window for f in result.project_data.files)
             }
-        
+            response_data['auto_attach_preview'] = [
+                {
+                    'name': file.filename,
+                    'type': file.filetype or 'text'
+                }
+                for file in result.project_data.files
+            ]
+
         return jsonify(response_data)
         
     except Exception as e:

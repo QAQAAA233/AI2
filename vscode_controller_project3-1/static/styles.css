@@ -233,7 +233,25 @@ body {
     margin-bottom: 4px;
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    gap: 8px;
+}
+
+.project-item-name .delete-project-btn {
+    margin-left: auto;
+}
+
+.project-status {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 6px;
+    border-radius: 6px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+}
+
+.project-status.pending {
+    background: rgba(16, 163, 127, 0.15);
+    color: var(--primary-color);
 }
 
 .project-item-desc {
@@ -520,6 +538,25 @@ body {
     background: var(--bg-secondary);
 }
 
+.panel-subsection {
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border-light);
+}
+
+.panel-subsection:last-of-type {
+    border-bottom: none;
+    padding-bottom: 8px;
+}
+
+.panel-subsection-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    padding: 0 18px 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
 .count-badge {
     background: var(--primary-color);
     color: white;
@@ -535,6 +572,10 @@ body {
     padding: 8px;
 }
 
+.panel-file-list.compact {
+    padding: 4px 12px;
+}
+
 .project-file-item,
 .attached-file-item {
     display: flex;
@@ -546,6 +587,11 @@ body {
     background: var(--bg-secondary);
     transition: all 0.2s;
     font-size: 13px;
+}
+
+.project-file-item.attached-auto {
+    border-left: 3px solid var(--primary-color);
+    background: rgba(16, 163, 127, 0.08);
 }
 
 .project-file-item:hover {
@@ -834,6 +880,18 @@ body {
     margin: 0;
     padding: 20px;
     min-height: 60vh; /* <-- 新增這一行 */
+}
+
+.results-placeholder {
+    width: 100%;
+    padding: 48px 32px;
+    border: 1px dashed var(--border-light);
+    border-radius: 12px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    text-align: center;
+    font-size: 15px;
+    line-height: 1.6;
 }
 
 .conversation-layout.memory-panel-collapsed .results-container {

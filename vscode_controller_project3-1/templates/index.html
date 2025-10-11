@@ -144,9 +144,16 @@
                             <span>附加檔案</span>
                             <span id="attachedFilesCount" class="count-badge">0</span>
                         </div>
-                        <div id="attachedFilesList" class="panel-file-list"></div>
+                        <div id="autoAttachedFilesContainer" class="panel-subsection" style="display: none;">
+                            <div class="panel-subsection-title">現有專案檔案 (自動附加)</div>
+                            <div id="autoAttachedFilesList" class="panel-file-list compact"></div>
+                        </div>
+                        <div id="manualAttachedFilesContainer" class="panel-subsection" style="display: none;">
+                            <div class="panel-subsection-title">手動附加檔案</div>
+                            <div id="attachedFilesList" class="panel-file-list"></div>
+                        </div>
                     </div>
-                    
+
                     <div id="panelEmptyState" class="panel-empty">
                         <svg class="icon-large" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>
