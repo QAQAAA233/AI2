@@ -1409,7 +1409,12 @@ async function loadSettings() {
         
         document.getElementById('apiKey').value = config.gemini_api_key || '';
         document.getElementById('modelName').value = config.model_name || 'gemini-2.5-pro';
-        
+
+        const promptModeSelect = document.getElementById('promptMode');
+        if (promptModeSelect) {
+            promptModeSelect.value = config.prompt_mode || 'default';
+        }
+
         const genParams = config.generation_params || {};
         document.getElementById('temperature').value = genParams.temperature || 0.7;
         document.getElementById('topP').value = genParams.top_p || 0.95;
@@ -1446,6 +1451,7 @@ async function saveSettings() {
             connection_method: 'api_key',
             gemini_api_key: document.getElementById('apiKey').value,
             model_name: document.getElementById('modelName').value,
+            prompt_mode: (document.getElementById('promptMode')?.value || 'default'),
             generation_params: {
                 temperature: parseFloat(document.getElementById('temperature').value),
                 top_p: parseFloat(document.getElementById('topP').value),

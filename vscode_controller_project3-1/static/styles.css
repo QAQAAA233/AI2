@@ -1448,6 +1448,13 @@ body {
     border-color: var(--text-secondary);
 }
 
+.form-hint {
+    margin-top: 6px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+}
+
 .password-input-group {
     position: relative;
 }

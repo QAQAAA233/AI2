@@ -141,6 +141,7 @@ class AIConfig:
     gemini_api_key: str = ""
     model_name: str = "gemini-2.5-pro"
     system_instruction: str = ""
+    prompt_mode: str = "default"
     generation_params: Dict[str, Any] = None
     thinking_config: Dict[str, Any] = None
     safety_settings: Dict[str, str] = None
@@ -175,6 +176,13 @@ class AIConfig:
                 "auto_test": False,
                 "monitor_interval": 5
             }
+
+        if not self.prompt_mode:
+            self.prompt_mode = "default"
+        else:
+            self.prompt_mode = str(self.prompt_mode).lower()
+            if self.prompt_mode not in {"default", "creative"}:
+                self.prompt_mode = "default"
 
 @dataclass
 class ConversationMessage:
@@ -306,36 +314,41 @@ def get_json_schema():
         "required": ["評分", "內容評價", "扣分原因", "改進建議", "核心記憶模塊", "專案輸出"]
     }
 
-def get_json_system_instruction():
-    """獲取 JSON 模式的系統指令 - 繁體中文版 + Flask修復"""
-    return """你是一位專業的程式碼與專案助理,負責在每次回應中同時提供程式碼成果、評分與記憶管理資訊,並優先根據最新的語法偵錯結果修復問題。
+def get_json_system_instruction(mode: str = "default", custom_instruction: str = "") -> str:
+    """獲取 JSON 模式的系統指令,支援多種提示詞模式"""
 
-請務必輸出**單一 JSON 物件**,欄位結構如下:
+    normalized_mode = (mode or "default").lower()
+    if normalized_mode not in {"default", "creative"}:
+        normalized_mode = "default"
+
+    base_instruction = """你是一位專業的程式碼與專案助理,必須在每次回應中提供完整可執行的程式碼成果、評分紀錄與記憶模塊。請永遠僅輸出**單一 JSON 物件**,並優先依照最新語法偵錯結果修復問題。凡涉及使用者介面或視覺呈現的需求,都要先審視互動流程與美感再撰寫程式,必要時主動調整佈局、動畫與可用性細節。
+
+JSON 結構必須包含以下欄位:
 {
-  "評分": 0-100 的整數,
-  "內容評價": "200 字內的綜合評論",
-  "扣分原因": "若無扣分請填『無』",
-  "改進建議": "下一次回應可改進的方向,若無請填『無』",
+  "評分": 0-100 的整數 (採保守原則,除非品質極佳,否則分數傾向較低),
+  "內容評價": "200 字內的規則遵守與內容品質評語",
+  "扣分原因": "具體說明扣分項,若無填『無』",
+  "改進建議": "聚焦於下一輪可新增的功能或體驗強化,不得僅提程式碼微調,若全數達成可填『無』",
   "核心記憶模塊": {
-      "專案總結": "摘要最新對話或專案重點",
-      "短期記憶": ["依照條列方式列出最近幾輪對話的關鍵資訊"...],
-      "長期記憶": ["以條列方式描述專案背景、核心目標或重要限制"...],
+      "專案總結": "簡述當前或上一輪的核心進展",
+      "短期記憶": ["以條列方式列出最近數輪對話的關鍵決策或限制"],
+      "長期記憶": ["條列專案背景、核心目標、重要限制或失敗教訓"],
       "專案目標": [
-          {"步驟": 1, "任務": "...", "狀態": "已完成/進行中/未開始", "是否為當前任務": true/false},
-          {"步驟": 2, ... 至少四個項目}
+          {"步驟": 1, "任務": "具體任務描述", "狀態": "已完成/進行中/未開始", "是否為當前任務": true/false},
+          {"步驟": 2, ... 至少四個項目,需依最新進度更新狀態}
       ]
   },
   "專案輸出": {
       "project_name": "專案名稱",
-      "description": "簡要描述",
+      "description": "專案描述",
       "main_file": "主要程式檔案名稱",
-      "setup_instructions": ["pip install package1"...],
+      "setup_instructions": ["pip install package"...],
       "run_instructions": ["python main.py"...],
       "files": [
           {
-              "filename": "檔案名稱(含副檔名)",
+              "filename": "含副檔名的檔案名稱",
               "filetype": "python/javascript/...",
-              "code": "完整無省略程式碼,使用實際換行符號",
+              "code": "完整無省略的繁體中文註解程式碼,使用真實換行符號",
               "opens_window": true/false,
               "window_title": null 或字串,
               "install_requirements": ["pip install ..."],
@@ -351,21 +364,56 @@ def get_json_system_instruction():
   }
 }
 
-執行規範:
-1. 僅能輸出有效 JSON,不得加入多餘文字、註解或 Markdown。
-2. 若提供語法偵錯結果,請優先修正其中列出的錯誤或警告,並在回應中說明修正方式。
-3. "短期記憶" 與 "長期記憶" 必須為字串陣列,每個元素對應一項條列內容,不得回傳空字串;若沒有資料請輸出空陣列 []。
-4. "files" 內的程式碼必須為完整、可執行、無省略號的繁體中文註解或文字,並以真實 \n 代表換行、\t 代表縮排。
-5. 若為 Flask/Node 等伺服器程式,禁止使用 debug=True 或熱重載模式,Flask 必須採用 `app.run(host='0.0.0.0', port=5000)`。
-6. 所有網頁相關檔案需填寫 `is_web_app`, 並在必要時提供 `server_address` 與 `web_title`。
-7. 任何需要額外套件的檔案,必須在 `install_requirements` 中完整列出安裝指令。
-8. 多檔案專案需確保相依檔案之間的匯入路徑正確,不得遺漏必要資源。
-9. 所有字串請使用繁體中文說明,除非程式語言語法或函式庫名稱要求英文。
-10. 專案目標需依進度更新狀態,並清楚標示當前主要任務。
-11. 評分、扣分原因、改進建議需與本次回覆內容一致,不得空泛。
+核心規範:
+1. 僅能輸出有效 JSON,禁止夾帶 Markdown、註解或額外文字。
+2. "短期記憶" 與 "長期記憶" 必須為字串陣列,若無資料請回傳 []。
+3. `files[].code` 需為完整可執行內容,不得出現省略號,並以 
+ 表示換行、	 表示縮排。
+4. 有使用者介面或畫面輸出的程式,需優先考量互動性、響應式設計與視覺層次,必要時補充微動畫、狀態提示或無障礙設計。
+5. 為確保跨系統穩定性,所有 Windows/Tkinter/Flask 等程式需避免 debug 模式,Flask 必須採用 `app.run(host='0.0.0.0', port=5000)`。
+6. 任何額外套件皆需列於 `install_requirements`,並同步於 `dependencies` 註明。
+7. 專案目標需隨進度更新狀態與「是否為當前任務」標記。
+8. 評分、扣分原因、改進建議需具體且對應本輪輸出,不得空泛或自我矛盾。
 
-請以這個全新結構回覆,不要沿用舊版模板或刪減任何必要欄位。"""
+模式加值指引:"""
 
+    if normalized_mode == "creative":
+        mode_instruction = """【模式：創意模式】
+- 在滿足基本可靠性的前提下,勇於提出跨平台或體驗導向的新功能,例如進階互動、動畫、個人化設定或整合第三方服務。
+- 改進建議應優先探索尚未實作的突破性能力,鼓勵 AI 於下一輪實驗創新解法,同時說明預期價值與使用者體驗。"""
+    else:
+        mode_instruction = """【模式：預設模式】
+- 保持穩健與可維護性,逐步完善現有需求並確保相容性與測試覆蓋。
+- 改進建議應聚焦於補齊缺失的必要功能或實用增強,並在實作前再次檢查使用者介面是否達到優雅且易用。"""
+
+    custom_block = ""
+    if custom_instruction:
+        custom_block = f"\n【使用者自訂補充】\n{custom_instruction.strip()}"
+
+    return "\n".join([
+        base_instruction,
+        mode_instruction,
+        "請以此最新模板回覆,不得沿用舊版提示詞或遺漏欄位。" + custom_block
+    ])
+
+
+def sanitize_json_strings(data: Any) -> Any:
+    """將字串中的控制符號轉換成安全的跳脫字元"""
+
+    if isinstance(data, dict):
+        return {key: sanitize_json_strings(value) for key, value in data.items()}
+
+    if isinstance(data, list):
+        return [sanitize_json_strings(item) for item in data]
+
+    if isinstance(data, str):
+        sanitized = data.replace('\r\n', '\n')
+        sanitized = sanitized.replace('\r', '\\r')
+        sanitized = sanitized.replace('\n', '\\n')
+        sanitized = sanitized.replace('\t', '\\t')
+        return sanitized
+
+    return data
 # ============================================
 # 配置管理模塊
 # ============================================
@@ -970,7 +1018,10 @@ class GeminiAI:
             gen_params = dict(config.generation_params)
             gen_params["response_mime_type"] = "application/json"
             
-            system_instruction = get_json_system_instruction()
+            system_instruction = get_json_system_instruction(
+                getattr(config, 'prompt_mode', 'default'),
+                config.system_instruction
+            )
             
             gen_config = GenerationConfig(**{
                 k: v for k, v in gen_params.items() if v is not None
@@ -2042,25 +2093,27 @@ class ProcessManager:
                 else:
                     normalized_json = json_data
 
-            if normalized_json:
-                memory_snapshot = normalized_json.get('核心記憶模塊') or normalized_json.get('core_memory_module')
+            sanitized_json = sanitize_json_strings(normalized_json) if normalized_json else None
+
+            if sanitized_json:
+                memory_snapshot = sanitized_json.get('核心記憶模塊') or sanitized_json.get('core_memory_module')
                 evaluation_snapshot = {
-                    '評分': normalized_json.get('評分'),
-                    '內容評價': normalized_json.get('內容評價'),
-                    '扣分原因': normalized_json.get('扣分原因'),
-                    '改進建議': normalized_json.get('改進建議')
+                    '評分': sanitized_json.get('評分'),
+                    '內容評價': sanitized_json.get('內容評價'),
+                    '扣分原因': sanitized_json.get('扣分原因'),
+                    '改進建議': sanitized_json.get('改進建議')
                 }
                 evaluation_snapshot = {k: v for k, v in evaluation_snapshot.items() if v is not None}
                 result.memory_snapshot = memory_snapshot
                 result.evaluation_snapshot = evaluation_snapshot
 
-            result.ai_response_json = normalized_json if normalized_json else None
+            result.ai_response_json = sanitized_json if sanitized_json else None
 
             logger.info("Step 2: 解析 AI 回應...")
             try:
-                if normalized_json:
+                if sanitized_json:
                     logger.info("使用 JSON 模式解析")
-                    project = CodeProcessor.parse_json_response(normalized_json)
+                    project = CodeProcessor.parse_json_response(sanitized_json)
                 else:
                     logger.info("嘗試從文本中提取 JSON")
                     try:
@@ -2073,8 +2126,9 @@ class ProcessManager:
                             potential_json = json.loads(json_str)
                             if isinstance(potential_json, list):
                                 potential_json = potential_json[0] if potential_json else {}
-                            project = CodeProcessor.parse_json_response(potential_json)
-                            result.ai_response_json = potential_json or None
+                            sanitized_potential = sanitize_json_strings(potential_json)
+                            project = CodeProcessor.parse_json_response(sanitized_potential)
+                            result.ai_response_json = sanitized_potential or None
                             logger.info("成功從文本中提取並解析 JSON")
                         else:
                             raise ValueError("無法從回應中找到有效的JSON結構")
@@ -2088,23 +2142,23 @@ class ProcessManager:
                 result.error = f"解析失敗: {str(parse_error)}"
                 
                 error_details = f"""
-=== ❌ 解析錯誤 ===
-{parse_error}
+                === \u274c 解析錯誤 ===
+                {parse_error}
 
-=== 🔍 可能的原因 ===
-1. AI 回應格式不正確
-2. JSON 結構有誤
-3. 程式碼格式化問題
+                === \U0001f50d 可能的原因 ===
+                1. AI 回應格式不正確
+                2. JSON 結構有誤
+                3. 程式碼格式化問題
 
-=== 💡 解決建議 ===
-1. 嘗試切換到文本模式
-2. 調整 AI 模型(建議使用 Gemini 2.5 Pro)
-3. 簡化您的需求描述
-4. 檢查 API Key 是否有效
+                === \U0001f4a1 解決建議 ===
+                1. 嘗試切換到文本模式
+                2. 調整 AI 模型(建議使用 Gemini 2.5 Pro)
+                3. 簡化您的需求描述
+                4. 檢查 API Key 是否有效
 
-=== 🤖 AI 原始回應 ===
-請查看下方「AI 回應」區域以檢視完整內容。
-"""
+                === \U0001f916 AI 原始回應 ===
+                請查看下方「AI 回應」區域以檢視完整內容。
+                """
                 
                 result.output = error_details
                 
