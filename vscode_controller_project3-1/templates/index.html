@@ -144,9 +144,16 @@
                             <span>附加檔案</span>
                             <span id="attachedFilesCount" class="count-badge">0</span>
                         </div>
-                        <div id="attachedFilesList" class="panel-file-list"></div>
+                        <div id="autoAttachedFilesContainer" class="panel-subsection" style="display: none;">
+                            <div class="panel-subsection-title">現有專案檔案 (自動附加)</div>
+                            <div id="autoAttachedFilesList" class="panel-file-list compact"></div>
+                        </div>
+                        <div id="manualAttachedFilesContainer" class="panel-subsection" style="display: none;">
+                            <div class="panel-subsection-title">手動附加檔案</div>
+                            <div id="attachedFilesList" class="panel-file-list"></div>
+                        </div>
                     </div>
-                    
+
                     <div id="panelEmptyState" class="panel-empty">
                         <svg class="icon-large" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>
@@ -179,7 +186,51 @@
                 </div>
             </div>
 
-            <div class="results-container" id="resultsContainer" style="display: none;"></div>
+            <div class="conversation-layout" id="conversationLayout">
+                <div class="results-container" id="resultsContainer" style="display: none;"></div>
+                <div class="memory-panel" id="memoryPanel" style="display: none;">
+                    <div class="memory-panel-header">
+                        <div class="memory-title-group">
+                            <h3>記憶與評分</h3>
+                            <span class="memory-project-label" id="memoryProjectLabel">尚未選擇專案</span>
+                        </div>
+                        <div class="memory-header-actions">
+                            <span class="memory-score" id="memoryScoreDisplay">--</span>
+                            <button class="memory-collapse-btn" id="memoryCollapseBtn" onclick="toggleMemoryPanel()" aria-label="收合記憶面板" aria-expanded="true">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="9 6 15 12 9 18"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="memory-panel-body" id="memoryPanelBody">
+                        <section class="memory-section">
+                            <h4>品質評分</h4>
+                            <div class="memory-evaluation-list" id="memoryEvaluationList"></div>
+                        </section>
+                        <section class="memory-section">
+                            <h4>專案摘要</h4>
+                            <p class="memory-text" id="memorySummaryBox">尚未建立專案總結</p>
+                        </section>
+                        <section class="memory-section">
+                            <h4>短期記憶</h4>
+                            <ul class="memory-bullet-list" id="memorySTMList">
+                                <li class="memory-placeholder">尚未累積短期記憶</li>
+                            </ul>
+                        </section>
+                        <section class="memory-section">
+                            <h4>長期記憶</h4>
+                            <ul class="memory-bullet-list" id="memoryLTMList">
+                                <li class="memory-placeholder">尚未建立長期記憶</li>
+                            </ul>
+                        </section>
+                        <section class="memory-section">
+                            <h4>專案目標</h4>
+                            <div class="memory-goals-list" id="memoryGoalsList"></div>
+                        </section>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <div class="input-area">
@@ -217,6 +268,21 @@
                                 </svg>
                                 <span>附加 Terminal 輸出</span>
                             </div>
+                            <div class="menu-item" id="diagnosticsMenuItem" onclick="toggleAttachDiagnostics()">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M9 9l6 6M15 9l-6 6"/>
+                                    <path d="M19 3H5a2 2 0 00-2 2v14l4-4h12a2 2 0 002-2V5a2 2 0 00-2-2z"/>
+                                </svg>
+                                <span>附加語法偵錯結果</span>
+                            </div>
+                            <div class="menu-item" id="memoryMenuItem" onclick="toggleAutoAttachMemory()">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 20l9-5-9-5-9 5 9 5z"/>
+                                    <path d="M3 10l9-5 9 5"/>
+                                </svg>
+                                <span>自動附加記憶上下文</span>
+                            </div>
+                            <div class="menu-hint" id="memorySuggestionPreview">上一輪改進建議：尚未有資料</div>
                             <div class="menu-divider"></div>
                             <div class="menu-item" onclick="showAdvancedSettings()">
                                 <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -288,6 +354,15 @@
                         <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
                         <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
                     </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">提示詞模式</label>
+                    <select class="form-select" id="promptMode">
+                        <option value="default">預設模式 (穩健執行)</option>
+                        <option value="creative">創意模式 (探索新功能)</option>
+                    </select>
+                    <div class="form-hint">預設模式優先確保需求完整與品質穩定；創意模式會額外鼓勵提出突破性的功能構想。</div>
                 </div>
 
                 <div class="info-box">
