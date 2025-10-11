@@ -424,6 +424,123 @@ def sanitize_json_strings(data: Any) -> Any:
         return sanitized
 
     return data
+
+
+def _is_escaped(text: str, index: int) -> bool:
+    """判斷索引位置的字元是否被跳脫"""
+
+    backslash_count = 0
+    i = index - 1
+    while i >= 0 and text[i] == '\\':
+        backslash_count += 1
+        i -= 1
+    return backslash_count % 2 == 1
+
+
+def _reescape_string_literal_controls(code: str) -> str:
+    """將單行字串常值中的控制字元重新轉換為跳脫序列"""
+
+    if not code:
+        return code
+
+    result: List[str] = []
+    i = 0
+    length = len(code)
+    in_string = False
+    string_delim = ''
+    is_triple = False
+    in_comment = False
+
+    while i < length:
+        ch = code[i]
+
+        if in_comment:
+            result.append(ch)
+            if ch == '\n':
+                in_comment = False
+            i += 1
+            continue
+
+        if not in_string:
+            if ch == '#':
+                in_comment = True
+                result.append(ch)
+                i += 1
+                continue
+
+            if ch in ('"', "'"):
+                if code.startswith(ch * 3, i):
+                    string_delim = ch * 3
+                    is_triple = True
+                    in_string = True
+                    result.append(string_delim)
+                    i += 3
+                    continue
+                else:
+                    string_delim = ch
+                    is_triple = False
+                    in_string = True
+                    result.append(ch)
+                    i += 1
+                    continue
+
+            result.append(ch)
+            if ch == '\n':
+                in_comment = False
+            i += 1
+            continue
+
+        if is_triple:
+            if code.startswith(string_delim, i):
+                result.append(string_delim)
+                i += len(string_delim)
+                in_string = False
+                is_triple = False
+                string_delim = ''
+            else:
+                result.append(ch)
+                i += 1
+            continue
+
+        if ch in ('"', "'") and ch == string_delim and not _is_escaped(code, i):
+            result.append(ch)
+            i += 1
+            in_string = False
+            string_delim = ''
+            continue
+
+        if ch == '\n':
+            result.append('\\n')
+            i += 1
+            continue
+
+        if ch == '\r':
+            result.append('\\r')
+            i += 1
+            continue
+
+        if ch == '\t':
+            result.append('\\t')
+            i += 1
+            continue
+
+        result.append(ch)
+        i += 1
+
+    return ''.join(result)
+
+
+def normalize_code_content(code: str) -> str:
+    """恢復字串中的跳脫字元,並確保單行字串常值的控制字元重新跳脫"""
+
+    if not isinstance(code, str):
+        return code
+
+    normalized = code.replace('\\r\\n', '\n')
+    normalized = normalized.replace('\\n', '\n')
+    normalized = normalized.replace('\\t', '\t')
+
+    return _reescape_string_literal_controls(normalized)
 # ============================================
 # 配置管理模塊
 # ============================================
@@ -690,47 +807,93 @@ class ProjectManager:
         """獲取專案結構字符串"""
         project_dir_path = Path(project_dir)
         structure_lines = [f"專案目錄: {project_dir_path.name}\n"]
-        
+
         exclude = {'PROJECT_INFO.json', '__pycache__', '.git', 'node_modules', 'venv', '.vscode'}
-        
+
         def build_tree(directory, prefix=""):
             contents = sorted(directory.iterdir(), key=lambda x: (x.is_file(), x.name))
             for i, path in enumerate(contents):
                 if path.name in exclude:
                     continue
-                
+
                 is_last = i == len(contents) - 1
                 current_prefix = "└── " if is_last else "├── "
                 structure_lines.append(f"{prefix}{current_prefix}{path.name}")
-                
+
                 if path.is_dir() and path.name not in exclude:
                     next_prefix = prefix + ("    " if is_last else "│   ")
                     build_tree(path, next_prefix)
-        
+
         build_tree(project_dir_path)
         return "\n".join(structure_lines)
+
+    @staticmethod
+    def _infer_filetype(path: Path) -> str:
+        ext = path.suffix.lower().lstrip('.')
+        if not ext:
+            return 'text'
+        if ext in {'py', 'js', 'ts', 'jsx', 'tsx', 'html', 'css', 'json', 'md', 'txt', 'csv', 'yml', 'yaml', 'toml', 'ini'}:
+            return ext
+        if ext in {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'svg'}:
+            return 'image'
+        if ext in {'mp4', 'mov', 'avi'}:
+            return 'video'
+        if ext in {'mp3', 'wav', 'ogg'}:
+            return 'audio'
+        return ext
+
+    @staticmethod
+    def build_fallback_project_info(project_dir: str) -> Dict[str, Any]:
+        """為缺少 PROJECT_INFO 的資料夾建立基本資訊"""
+        project_dir_path = Path(project_dir)
+        exclude = {'PROJECT_INFO.json', '__pycache__', '.git', 'node_modules', 'venv', '.vscode'}
+
+        files_manifest = []
+        file_counter = 0
+        for file_path in project_dir_path.rglob('*'):
+            if file_path.is_file() and file_path.name not in exclude:
+                if any(ex in file_path.parts for ex in exclude):
+                    continue
+
+                files_manifest.append({
+                    'filename': str(file_path.relative_to(project_dir_path)),
+                    'filetype': ProjectManager._infer_filetype(file_path),
+                    'description': ''
+                })
+                file_counter += 1
+                if file_counter >= 500:
+                    break
+
+        return {
+            'project_name': project_dir_path.name,
+            'description': '匯入的現有資料夾',
+            'main_file': None,
+            'files': files_manifest
+        }
     
     @staticmethod
-    def add_to_project_list(project_dir: str, project_name: str, description: str = ""):
+    def add_to_project_list(project_dir: str, project_name: str, description: str = "", is_placeholder: bool = False):
         """添加專案到列表"""
         try:
             project_list = ProjectManager.get_project_list()
-            
+
             existing = next((p for p in project_list if p['path'] == project_dir), None)
-            
+
             if existing:
                 existing['name'] = project_name
                 existing['description'] = description
                 existing['last_accessed'] = datetime.now().isoformat()
+                existing['is_placeholder'] = is_placeholder
             else:
                 project_list.append({
                     'path': project_dir,
                     'name': project_name,
                     'description': description,
                     'created_at': datetime.now().isoformat(),
-                    'last_accessed': datetime.now().isoformat()
+                    'last_accessed': datetime.now().isoformat(),
+                    'is_placeholder': is_placeholder
                 })
-            
+
             with open(PROJECT_LIST_FILE, 'w', encoding='utf-8') as f:
                 json.dump(project_list, f, indent=2, ensure_ascii=False)
             
@@ -745,10 +908,14 @@ class ProjectManager:
         """獲取專案列表"""
         if not PROJECT_LIST_FILE.exists():
             return []
-        
+
         try:
             with open(PROJECT_LIST_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                project_list = json.load(f)
+                for item in project_list:
+                    if 'is_placeholder' not in item:
+                        item['is_placeholder'] = False
+                return project_list
         except Exception as e:
             logger.error(f"讀取專案列表失敗: {e}")
             return []
@@ -1435,10 +1602,7 @@ class CodeProcessor:
                 code = file_data.get('code', '')
 
                 if isinstance(code, str):
-                    code = code.replace('\\n', '\n')
-                    code = code.replace('\\t', '\t')
-                    code = code.replace('\\"', '"')
-                    code = code.replace("\\'", "'")
+                    code = normalize_code_content(code)
 
                 files.append(FileOutput(
                     filename=file_data.get('filename', 'untitled.txt'),
@@ -2242,8 +2406,11 @@ class ProcessManager:
             execution_detail = ""
             window_titles_to_capture = []
             
-            ProjectManager.add_to_project_list(final_project_dir, project.project_name, project.description)
-            
+            ProjectManager.add_to_project_list(final_project_dir, project.project_name, project.description, is_placeholder=False)
+
+            if not is_iteration and final_project_dir != folder_path:
+                ProjectManager.remove_from_project_list(folder_path)
+
             if project.main_file:
                 main_file_path = Path(final_project_dir) / project.main_file
                 
@@ -2521,16 +2688,29 @@ def load_project():
             }), 400
         
         project_info = ProjectManager.load_project_info(project_dir)
+        info_source = 'project_info'
         if not project_info:
-            return jsonify({
-                'success': False,
-                'error': '找不到 PROJECT_INFO.json 檔案'
-            }), 404
-        
+            project_info = ProjectManager.build_fallback_project_info(project_dir)
+            info_source = 'fallback'
+
         project_files = ProjectManager.load_project_files(project_dir)
         project_structure = ProjectManager.get_project_structure(project_dir)
         conversation = ConversationManager.load_conversation(project_dir)
-        
+
+        if conversation.project_name != project_info.get('project_name'):
+            conversation.project_name = project_info.get('project_name', conversation.project_name)
+            ConversationManager.save_conversation(conversation)
+
+        attached_files_preview = []
+        for file_meta in project_info.get('files', []):
+            filename = file_meta.get('filename') or file_meta.get('name')
+            if not filename:
+                continue
+            attached_files_preview.append({
+                'name': filename,
+                'type': file_meta.get('filetype') or 'text'
+            })
+
         # ⭐ 修復:正確序列化對話消息,保留 usage_metadata
         messages_data = []
         for msg in conversation.messages:
@@ -2551,6 +2731,8 @@ def load_project():
             'project_files': project_files,
             'project_structure': project_structure,
             'files_count': len(project_files),
+            'attached_files': attached_files_preview,
+            'info_source': info_source,
             'conversation': {
                 'messages': messages_data,
                 'created_at': conversation.created_at,
@@ -2620,6 +2802,47 @@ def get_projects():
         })
     except Exception as e:
         logger.error(f"獲取專案列表失敗: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/projects/register', methods=['POST'])
+def register_project():
+    """新增或更新專案列表中的專案條目"""
+    try:
+        data = request.get_json() or {}
+        project_path = data.get('path')
+
+        if not project_path:
+            return jsonify({
+                'success': False,
+                'error': '缺少專案路徑'
+            }), 400
+
+        project_name = data.get('name') or Path(project_path).name
+        description = data.get('description') or ''
+        is_placeholder = bool(data.get('is_placeholder', False))
+
+        success = ProjectManager.add_to_project_list(project_path, project_name, description, is_placeholder)
+
+        if success:
+            return jsonify({
+                'success': True,
+                'project': {
+                    'path': project_path,
+                    'name': project_name,
+                    'description': description,
+                    'is_placeholder': is_placeholder
+                }
+            })
+
+        return jsonify({
+            'success': False,
+            'error': '無法更新專案列表'
+        }), 500
+    except Exception as e:
+        logger.error(f"註冊專案失敗: {e}")
         return jsonify({
             'success': False,
             'error': str(e)
